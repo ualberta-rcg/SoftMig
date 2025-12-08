@@ -322,14 +322,14 @@ void load_nvml_libraries() {
     }
     int i;
     for (i = 0; i < NVML_ENTRY_END; i++) {
-        LOG_DEBUG("loading %s:%d",nvml_library_entry[i].name,i);
+        // Reduced logging - only log missing functions, not every loaded function
         nvml_library_entry[i].fn_ptr = real_dlsym(table, nvml_library_entry[i].name);
         if (!nvml_library_entry[i].fn_ptr) {
             LOG_INFO("can't find function %s in %s", nvml_library_entry[i].name,
                 driver_filename);
         }
     }
-    LOG_INFO("loaded nvml libraries");
+    LOG_DEBUG("loaded nvml libraries");
     dlclose(table);
 }
 
@@ -347,7 +347,7 @@ void nvml_postInit() {
 }
 
 nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int version) {
-    LOG_DEBUG("into nvmlDeviceGetMemoryInfo");
+    // Reduced logging - nvmlDeviceGetMemoryInfo is called very frequently (e.g., by nvidia-smi)
     if (memory == NULL) {
         return NVML_SUCCESS;
     }
@@ -356,11 +356,11 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
     switch (version) {
         case 1:
             CHECK_NVML_API(NVML_OVERRIDE_CALL(nvml_library_entry,nvmlDeviceGetMemoryInfo, device, memory));
-            LOG_DEBUG("origin_free=%lld total=%lld\n", ((nvmlMemory_t*)memory)->free, ((nvmlMemory_t*)memory)->total);
+            // Removed frequent debug log
             break;
         case 2:
             CHECK_NVML_API(NVML_OVERRIDE_CALL(nvml_library_entry,nvmlDeviceGetMemoryInfo_v2, device, (nvmlMemory_v2_t *)memory));
-            LOG_DEBUG("origin_free=%lld total=%lld\n", ((nvmlMemory_v2_t*)memory)->free, ((nvmlMemory_v2_t*)memory)->total);
+            // Removed frequent debug log
             break;
         default:
             return NVML_ERROR_INVALID_ARGUMENT;
@@ -373,7 +373,7 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
     size_t usage = get_current_device_memory_usage(cudadev);
     size_t monitor = get_current_device_memory_monitor(cudadev);
     size_t limit = get_current_device_memory_limit(cudadev);
-    LOG_DEBUG("usage=%ld limit=%ld monitor=%ld", usage, limit, monitor);
+    // Reduced logging - this function is called very frequently
     if (limit == 0) {
         // No limit (e.g., root user) - pass through original NVML values unchanged
         // The original NVML call already set free, total, and used correctly
@@ -416,14 +416,14 @@ nvmlReturn_t nvmlDeviceGetNvLinkRemotePciInfo ( nvmlDevice_t device, unsigned in
 
 nvmlReturn_t nvmlDeviceGetHandleByIndex ( unsigned int  index, nvmlDevice_t* device ){
     nvmlReturn_t res;
-    LOG_DEBUG("nvmlDeviceGetHandleByIndex index=%u",index); 
+    // Reduced logging - called frequently
     res = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry,nvmlDeviceGetHandleByIndex,index,device);
     return res;
 }
 
 nvmlReturn_t nvmlDeviceGetHandleByIndex_v2 ( unsigned int  index, nvmlDevice_t* device ){
     nvmlReturn_t res;
-    LOG_DEBUG("nvmlDeviceGetHandleByIndex_v2 index=%u",index); 
+    // Reduced logging - called frequently
     res = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry,nvmlDeviceGetHandleByIndex_v2,index,device);
     return res;
 }

@@ -4,7 +4,19 @@
 #        cuMemAlloc, cuMemAllocManaged, cuMemCreate/VMM
 
 export LIBCUDA_LOG_LEVEL=5
-module load cuda/12.2
+# Try to load CUDA module if available (Compute Canada/CVMFS)
+if command -v module >/dev/null 2>&1; then
+    module load cuda/12.2 2>/dev/null || module load cuda 2>/dev/null || true
+fi
+# If CUDA_HOME is not set, try to find it
+if [ -z "$CUDA_HOME" ]; then
+    if [ -d "/cvmfs/soft.computecanada.ca/config/bin/cuda" ]; then
+        # Compute Canada CVMFS
+        export CUDA_HOME=$(ls -d /cvmfs/soft.computecanada.ca/config/bin/cuda/*/ 2>/dev/null | head -1)
+    elif [ -d "/usr/local/cuda" ]; then
+        export CUDA_HOME=/usr/local/cuda
+    fi
+fi
 
 ###############################################
 # DIAGNOSTIC FUNCTIONS
@@ -315,45 +327,44 @@ if [ -n "$MAIN_LOG" ] && [ -f "$MAIN_LOG" ]; then
     tail -20 "$MAIN_LOG" | sed 's/^/  /'
     echo ""
     
-    # Check for process summing logs
-    echo "=== Checking for Process Summing Logs ==="
+    # Check for process summing logs (optional - these may not exist in all versions)
+    echo "=== Checking for Process Summing Logs (Optional) ==="
     if grep -q "into nvmlDeviceGetMemoryInfo" "$MAIN_LOG" 2>/dev/null; then
         COUNT=$(grep -c "into nvmlDeviceGetMemoryInfo" "$MAIN_LOG" 2>/dev/null)
         echo "  ✅ Found $COUNT calls to nvmlDeviceGetMemoryInfo"
     else
-        echo "  ❌ No calls to nvmlDeviceGetMemoryInfo found"
-        echo "     (nvidia-smi may not be calling the hooked function)"
+        echo "  ⚠️  No 'into nvmlDeviceGetMemoryInfo' logs found (may be reduced logging)"
+        echo "     This is normal if logging verbosity is reduced"
     fi
     
     if grep -q "get_current_device_memory_usage.*Found.*processes" "$MAIN_LOG" 2>/dev/null; then
         echo "  ✅ Found process summing logs:"
         grep "get_current_device_memory_usage.*Found.*processes" "$MAIN_LOG" | tail -3 | sed 's/^/    /'
     else
-        echo "  ❌ No process summing logs found"
-        echo "     (Function may not be reaching the summing code)"
+        echo "  ⚠️  No process summing logs found (may not be in this version)"
     fi
     
     if grep -q "Manual sum" "$MAIN_LOG" 2>/dev/null; then
         echo "  ✅ Found manual sum logs:"
         grep "Manual sum" "$MAIN_LOG" | tail -3 | sed 's/^/    /'
     else
-        echo "  ❌ No manual sum logs found"
+        echo "  ⚠️  No manual sum logs found (may not be in this version)"
     fi
     
     if grep -q "Process\[.*PID=" "$MAIN_LOG" 2>/dev/null; then
         echo "  ✅ Found process detail logs (showing last 5):"
         grep "Process\[.*PID=" "$MAIN_LOG" | tail -5 | sed 's/^/    /'
     else
-        echo "  ❌ No process detail logs found"
+        echo "  ⚠️  No process detail logs found (may not be in this version)"
     fi
     
     echo ""
-    echo "=== Debug: get_current_device_memory_usage calls ==="
+    echo "=== Debug: get_current_device_memory_usage calls (Optional) ==="
     if grep -q "get_current_device_memory_usage" "$MAIN_LOG" 2>/dev/null; then
         echo "  Found calls (showing last 5):"
         grep "get_current_device_memory_usage" "$MAIN_LOG" | tail -5 | sed 's/^/    /'
     else
-        echo "  ❌ No calls to get_current_device_memory_usage found"
+        echo "  ⚠️  No calls to get_current_device_memory_usage found (may be reduced logging)"
     fi
 else
     echo "  ⚠️  No main log file found"

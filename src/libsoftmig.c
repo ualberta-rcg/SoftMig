@@ -121,7 +121,7 @@ static fp_dlsym get_real_dlsym_safe(void) {
 }
 
 FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
-    LOG_DEBUG("into dlsym %s",symbol);
+    // Reduced logging - dlsym is called very frequently
     pthread_once(&dlsym_init_flag,init_dlsym);
     if (real_dlsym == NULL) {
         real_dlsym = get_real_dlsym_safe();
