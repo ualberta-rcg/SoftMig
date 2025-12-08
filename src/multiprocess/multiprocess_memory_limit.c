@@ -229,9 +229,13 @@ size_t get_gpu_memory_monitor(const int dev) {
     }
     int i=0;
     size_t total=0;
+    const uint64_t MIN_PROCESS_MEMORY = 64 * 1024 * 1024;  // 64 MB minimum per process
     lock_shrreg();
     for (i=0;i<region_info.shared_region->proc_num;i++){
-        total+=region_info.shared_region->procs[i].monitorused[dev];
+        uint64_t process_mem = region_info.shared_region->procs[i].monitorused[dev];
+        // Ensure each process has at least MIN_PROCESS_MEMORY
+        uint64_t process_mem_counted = (process_mem < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem;
+        total += process_mem_counted;
     }
     unlock_shrreg();
     return total;
@@ -320,6 +324,7 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
     }
     int i = 0;
     uint64_t usage = 0;
+    const uint64_t MIN_PROCESS_MEMORY = 64 * 1024 * 1024;  // 64 MB minimum per process
     shared_region_t* region = region_info.shared_region;
     lock_shrreg();
     for (; i < pcnt; i++) {
@@ -327,7 +332,11 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
         for (; slot < region->proc_num; slot++) {
             if (infos[i].pid != region->procs[slot].pid)
                 continue;
-            usage += infos[i].usedGpuMemory;
+            uint64_t process_mem = infos[i].usedGpuMemory;
+            // Ensure each process has at least MIN_PROCESS_MEMORY
+            uint64_t process_mem_counted = (process_mem < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem;
+            usage += process_mem_counted;
+            break;  // Found matching PID, no need to continue searching
         }
     }
     unlock_shrreg();
