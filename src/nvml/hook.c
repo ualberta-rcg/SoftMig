@@ -1,12 +1,17 @@
 #include <string.h>
 #include <ctype.h>
 #include <dlfcn.h>
-#include "include/libnvml_hook.h"
+// Prevent system <nvml.h> from being included - we use nvml-subset.h instead
+// This macro tells nvml.h (if included) to skip some definitions
+#define NVML_NO_UNVERSIONED_FUNC_DEFS
+// Include nvml-subset.h FIRST - it defines structures we need
 #include "include/nvml-subset.h"
 #include "include/nvml_prefix.h"
+#include "include/libnvml_hook.h"
 #include "include/nvml_override.h"
-#include <nvml.h>
 #include "include/utils.h"
+// Note: multiprocess_memory_limit.h includes <nvml.h> in its .c file, not the .h file
+// So including the header here should be safe
 #include "multiprocess/multiprocess_memory_limit.h"
 
 entry_t nvml_library_entry[] = {

@@ -23,21 +23,8 @@ nvmlReturn_t nvmlInternalGetExportTable(const void **ppExportTable,
 
 //nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t* memory);
 
-nvmlReturn_t nvmlDeviceGetPciInfo_v2(nvmlDevice_t device, nvmlPciInfo_t *pci);
-
-nvmlReturn_t nvmlDeviceGetGridLicensableFeatures_v2(
-    nvmlDevice_t device,
-    nvmlGridLicensableFeatures_t *pGridLicensableFeatures);
-
-nvmlReturn_t nvmlDeviceGetGridLicensableFeatures_v3(
-    nvmlDevice_t device,
-    nvmlGridLicensableFeatures_t *pGridLicensableFeatures);
-
-nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
-                                                     unsigned int *infoCount,
-                                                     nvmlProcessInfo_v2_t *infos);
-
-nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
-    nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_v2_t *infos);
+// Function declarations removed - these are implemented in hook.c and nvml_entry.c
+// Declaring them here causes conflicts with system <nvml.h> when it's included
+// The implementations in hook.c serve as the declarations
 
 #endif
