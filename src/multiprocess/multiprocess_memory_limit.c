@@ -123,7 +123,9 @@ int load_env_from_file(char *filename) {
     char tmp[10000];
     int cursor=0;
     while (!feof(f)){
-        fgets(tmp,10000,f);
+        if (fgets(tmp,10000,f) == NULL) {
+            break;
+        }
         if (strstr(tmp,"=")==NULL)
             break;
         if (tmp[strlen(tmp)-1]=='\n')
@@ -414,7 +416,7 @@ int fix_lock_shrreg() {
         int flag = 0;
         if (current_owner == region_info.pid) {
             // Detect owner pid = self pid
-                "indicates pid loopback or race condition", current_owner);
+            LOG_WARN("Owner pid equals self pid (%d), indicates pid loopback or race condition", current_owner);
             flag = 1;
         } else {
             int proc_status = proc_alive(current_owner);
@@ -619,7 +621,7 @@ void print_all() {
         LOG_INFO("softmig is disabled - no process information available");
         return;
     }
-    int i;
+    // Function body intentionally empty - reserved for future debugging output
 }
 
 void child_reinit_flag() {
@@ -930,9 +932,7 @@ uint64_t get_current_device_memory_monitor(const int dev) {
 }
 
 uint64_t get_current_device_memory_usage(const int dev) {
-    clock_t start,finish;
     uint64_t result;
-    start = clock();
     ensure_initialized();
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return 0;  // No usage tracking when softmig is disabled
@@ -942,7 +942,6 @@ uint64_t get_current_device_memory_usage(const int dev) {
     }
     result = get_gpu_memory_usage(dev);
 //    result= nvml_get_device_memory_usage(dev);
-    finish=clock();
     return result;
 }
 

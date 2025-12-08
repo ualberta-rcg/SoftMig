@@ -78,7 +78,10 @@ static inline char* get_log_file_path(void) {
     
     // Create directory if it doesn't exist (try, but don't fail if no permission)
     char dir_path[512];
-    strncpy(dir_path, log_path, sizeof(dir_path) - 1);
+    size_t log_path_len = strlen(log_path);
+    size_t copy_len = (log_path_len < sizeof(dir_path) - 1) ? log_path_len : sizeof(dir_path) - 1;
+    memcpy(dir_path, log_path, copy_len);
+    dir_path[copy_len] = '\0';
     char* last_slash = strrchr(dir_path, '/');
     if (last_slash != NULL) {
         *last_slash = '\0';
