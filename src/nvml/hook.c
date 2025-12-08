@@ -346,6 +346,40 @@ void nvml_postInit() {
     init_device_info();
 }
 
+// Sum memory usage directly from NVML by querying running processes
+// This is more accurate than tracking allocations ourselves
+static uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
+    unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
+    nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    
+    // Get the real NVML function (bypass our hook to avoid recursion)
+    nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, 
+                                                   nvmlDeviceGetComputeRunningProcesses, 
+                                                   device, &process_count, infos);
+    
+    if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+        // If we can't get process info, fall back to tracked usage
+        LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses failed: %d, falling back to tracked usage", ret);
+        return 0;  // Return 0 to trigger fallback
+    }
+    
+    uint64_t total_usage = 0;
+    const uint64_t PER_PROCESS_OVERHEAD = 2 * 1024 * 1024;  // 2 MB overhead per process
+    const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;  // NVML constant for unavailable values
+    
+    // Sum up memory from all processes
+    for (unsigned int i = 0; i < process_count; i++) {
+        // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
+        if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
+            total_usage += infos[i].usedGpuMemory;
+            // Add small overhead per process (a few MB as user suggested)
+            total_usage += PER_PROCESS_OVERHEAD;
+        }
+    }
+    
+    return total_usage;
+}
+
 nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int version) {
     // Reduced logging - nvmlDeviceGetMemoryInfo is called very frequently (e.g., by nvidia-smi)
     if (memory == NULL) {
@@ -370,28 +404,40 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
     if (cudadev < 0) {
         return NVML_SUCCESS;
     }
-    size_t usage = get_current_device_memory_usage(cudadev);
-    size_t monitor = get_current_device_memory_monitor(cudadev);
+    
     size_t limit = get_current_device_memory_limit(cudadev);
     // Reduced logging - this function is called very frequently
     if (limit == 0) {
         // No limit (e.g., root user) - pass through original NVML values unchanged
         // The original NVML call already set free, total, and used correctly
         return NVML_SUCCESS;
-    } else {
-        switch (version) {
-        case 1:
-             ((nvmlMemory_t*)memory)->free = (limit-usage);
-             ((nvmlMemory_t*)memory)->total = limit;
-             ((nvmlMemory_t*)memory)->used = usage;
-            return NVML_SUCCESS;
-        case 2:
-            ((nvmlMemory_v2_t *)memory)->free = (limit-usage);
-            ((nvmlMemory_v2_t *)memory)->total = limit;
-            ((nvmlMemory_v2_t *)memory)->used = usage;
-            return NVML_SUCCESS;
-        } 
     }
+    
+    // Sum memory usage directly from NVML processes (more accurate than tracking)
+    uint64_t usage = sum_process_memory_from_nvml(device);
+    
+    // Fallback to tracked usage if NVML query failed
+    if (usage == 0) {
+        usage = get_current_device_memory_usage(cudadev);
+    }
+    
+    // Ensure usage doesn't exceed limit
+    if (usage > limit) {
+        usage = limit;
+    }
+    
+    switch (version) {
+    case 1:
+         ((nvmlMemory_t*)memory)->free = (limit > usage) ? (limit - usage) : 0;
+         ((nvmlMemory_t*)memory)->total = limit;
+         ((nvmlMemory_t*)memory)->used = usage;
+        return NVML_SUCCESS;
+    case 2:
+        ((nvmlMemory_v2_t *)memory)->free = (limit > usage) ? (limit - usage) : 0;
+        ((nvmlMemory_v2_t *)memory)->total = limit;
+        ((nvmlMemory_v2_t *)memory)->used = usage;
+        return NVML_SUCCESS;
+    } 
     return NVML_SUCCESS;
 }
 
