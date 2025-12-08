@@ -356,7 +356,8 @@ void nvml_postInit() {
 
 // Sum memory usage directly from NVML by querying running processes
 // This is more accurate than tracking allocations ourselves
-static uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
+// Made non-static so it can be used for enforcement checks too
+uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
     // Use nvmlProcessInfo_t from nvml-subset.h (standard type)
     nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];

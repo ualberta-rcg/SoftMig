@@ -19,6 +19,7 @@
 
 #include "include/process_utils.h"
 #include "include/memory_limit.h"
+#include "include/libnvml_hook.h"  // For NVML_FIND_ENTRY and driver_sym_t
 #include "multiprocess/multiprocess_memory_limit.h"
 
 // Forward declaration - defined in config_file.c
@@ -934,17 +935,55 @@ uint64_t get_current_device_memory_monitor(const int dev) {
     return result;
 }
 
+// Forward declaration - implemented in src/nvml/hook.c
+extern uint64_t sum_process_memory_from_nvml(nvmlDevice_t device);
+extern entry_t nvml_library_entry[];
+
+// Helper function to get NVML device from CUDA device ID
+static nvmlDevice_t get_nvml_device_from_cuda(int cudadev) {
+    nvmlDevice_t nvml_device;
+    unsigned int nvml_index = cuda_to_nvml_map(cudadev);
+    if (nvml_index >= CUDA_DEVICE_MAX_COUNT) {
+        return NULL;
+    }
+    // Use the NVML override mechanism to get device handle
+    // We need to call the real NVML function, not our hook
+    nvmlReturn_t ret;
+    driver_sym_t entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex);
+    if (entry == NULL) {
+        return NULL;
+    }
+    ret = entry(nvml_index, &nvml_device);
+    if (ret != NVML_SUCCESS) {
+        return NULL;
+    }
+    return nvml_device;
+}
+
 uint64_t get_current_device_memory_usage(const int dev) {
-    uint64_t result;
     ensure_initialized();
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return 0;  // No usage tracking when softmig is disabled
     }
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
+        return 0;
     }
-    result = get_gpu_memory_usage(dev);
-//    result= nvml_get_device_memory_usage(dev);
+    
+    // Try NVML process summing first (more accurate, works even for unhooked allocations)
+    nvmlDevice_t nvml_device = get_nvml_device_from_cuda(dev);
+    if (nvml_device != NULL) {
+        uint64_t nvml_usage = sum_process_memory_from_nvml(nvml_device);
+        if (nvml_usage > 0) {
+            // Successfully got usage from NVML
+            return nvml_usage;
+        }
+        // If NVML returned 0, it might mean no processes or query failed
+        // Fall through to tracked usage as fallback
+    }
+    
+    // Fallback to old tracking system (only for processes we've hooked)
+    uint64_t result = get_gpu_memory_usage(dev);
     return result;
 }
 
