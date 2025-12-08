@@ -177,18 +177,6 @@ size_t get_limit_from_config_or_env(const char* env_name) {
     return scaled_res;
 }
 
-// Delete config file on job exit
-void cleanup_config_file(void) {
-    char* config_path = get_config_file_path();
-    if (config_path[0] != '\0') {
-        if (unlink(config_path) == 0) {
-            LOG_DEBUG("Deleted config file: %s", config_path);
-        } else {
-            LOG_DEBUG("Could not delete config file %s (may not exist): %d", config_path, errno);
-        }
-    }
-}
-
 // Check if softmig should be active (either CUDA_DEVICE_MEMORY_LIMIT or CUDA_DEVICE_SM_LIMIT is set)
 // Returns 1 if at least one is set, 0 if neither is set
 int is_softmig_configured(void) {

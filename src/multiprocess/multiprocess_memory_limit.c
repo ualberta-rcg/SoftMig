@@ -448,9 +448,6 @@ void exit_withlock(int exitcode) {
 }
 
 
-// External function from config_file.c - cleanup config file
-extern void cleanup_config_file(void);
-
 void exit_handler() {
     if (region_info.init_status == PTHREAD_ONCE_INIT) {
         return;
@@ -460,16 +457,14 @@ void exit_handler() {
     // Check if shared region was never initialized (e.g., program failed to start)
     // This can happen when bash loads the library but the program doesn't exist
     if (region == NULL) {
-        // Clean up config file even if shared region wasn't initialized
-        cleanup_config_file();
+        // Nothing to clean up if shared region wasn't initialized
         return;
     }
     
     int slot = 0;
     LOG_MSG("Calling exit handler %d",getpid());
     
-    // Clean up config file (delete it)
-    cleanup_config_file();
+    // Note: Config file cleanup is handled by the SLURM epilog script, not by individual processes
     
     struct timespec sem_ts;
     get_timespec(SEM_WAIT_TIME_ON_EXIT, &sem_ts);
