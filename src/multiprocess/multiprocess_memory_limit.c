@@ -15,7 +15,9 @@
 #include <assert.h>
 #include <cuda.h>
 #include "include/nvml_prefix.h"
-#include <nvml.h>
+// Don't include <nvml.h> - it conflicts with nvml-subset.h
+// Use nvml-subset.h via libnvml_hook.h instead
+#include "include/nvml-subset.h"  // For NVML types
 
 #include "include/process_utils.h"
 #include "include/memory_limit.h"
@@ -109,12 +111,40 @@ int init_device_info() {
         return 0;  // No-op when softmig is disabled
     }
     unsigned int i,nvmlDevicesCount;
-    CHECK_NVML_API(nvmlDeviceGetCount_v2(&nvmlDevicesCount));
+    // Use NVML override mechanism
+    driver_sym_t entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetCount_v2);
+    if (entry == NULL) {
+        LOG_ERROR("nvmlDeviceGetCount_v2 not found");
+        return 0;
+    }
+    nvmlReturn_t ret = entry(&nvmlDevicesCount);
+    if (ret != NVML_SUCCESS) {
+        LOG_ERROR("nvmlDeviceGetCount_v2 failed: %d", ret);
+        return 0;
+    }
     region_info.shared_region->device_num=nvmlDevicesCount;
     nvmlDevice_t dev;
+    entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex);
+    if (entry == NULL) {
+        LOG_ERROR("nvmlDeviceGetHandleByIndex not found");
+        return 0;
+    }
+    driver_sym_t uuid_entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetUUID);
+    if (uuid_entry == NULL) {
+        LOG_ERROR("nvmlDeviceGetUUID not found");
+        return 0;
+    }
     for(i=0;i<nvmlDevicesCount;i++){
-        CHECK_NVML_API(nvmlDeviceGetHandleByIndex(i, &dev));
-        CHECK_NVML_API(nvmlDeviceGetUUID(dev,region_info.shared_region->uuids[i],NVML_DEVICE_UUID_V2_BUFFER_SIZE));
+        ret = entry(i, &dev);
+        if (ret != NVML_SUCCESS) {
+            LOG_ERROR("nvmlDeviceGetHandleByIndex failed for device %u: %d", i, ret);
+            return 0;
+        }
+        ret = uuid_entry(dev, region_info.shared_region->uuids[i], NVML_DEVICE_UUID_V2_BUFFER_SIZE);
+        if (ret != NVML_SUCCESS) {
+            LOG_ERROR("nvmlDeviceGetUUID failed for device %u: %d", i, ret);
+            return 0;
+        }
     }
     return 0;
 }
@@ -309,15 +339,41 @@ int init_gpu_device_utilization(){
 uint64_t nvml_get_device_memory_usage(const int dev) {
     nvmlDevice_t ndev;
     nvmlReturn_t ret;
-    ret = nvmlDeviceGetHandleByIndex(dev, &ndev);
+    // Use NVML override mechanism to get device handle
+    driver_sym_t entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetHandleByIndex);
+    if (entry == NULL) {
+        LOG_ERROR("NVML nvmlDeviceGetHandleByIndex not found");
+        return 0;
+    }
+    ret = entry(dev, &ndev);
     if (ret != NVML_SUCCESS) {
-        LOG_ERROR("NVML get device %d error, %s", dev, nvmlErrorString(ret));
+        // Get error string via override mechanism
+        driver_sym_t err_entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlErrorString);
+        const char* err_str = "unknown";
+        if (err_entry != NULL) {
+            err_str = ((const char*(*)(nvmlReturn_t))err_entry)(ret);
+        }
+        LOG_ERROR("NVML get device %d error, %s", dev, err_str);
+        return 0;
     }
     unsigned int pcnt = SHARED_REGION_MAX_PROCESS_NUM;
-    nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
-    ret = nvmlDeviceGetComputeRunningProcesses(ndev, &pcnt, infos);
-    if (ret != NVML_SUCCESS) {
-        LOG_ERROR("NVML get process error, %s", nvmlErrorString(ret));
+    // Use nvmlProcessInfo_t from nvml-subset.h (same as nvmlProcessInfo_v1_t)
+    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses);
+    if (entry == NULL) {
+        LOG_ERROR("NVML nvmlDeviceGetComputeRunningProcesses not found");
+        return 0;
+    }
+    ret = entry(ndev, &pcnt, infos);
+    if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+        // Get error string via override mechanism
+        driver_sym_t err_entry = NVML_FIND_ENTRY(nvml_library_entry, nvmlErrorString);
+        const char* err_str = "unknown";
+        if (err_entry != NULL) {
+            err_str = ((const char*(*)(nvmlReturn_t))err_entry)(ret);
+        }
+        LOG_ERROR("NVML get process error, %s", err_str);
+        return 0;
     }
     int i = 0;
     uint64_t usage = 0;
