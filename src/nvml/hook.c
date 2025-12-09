@@ -290,7 +290,7 @@ void load_nvml_libraries() {
         // Try multiple methods to get the real dlsym, more robust for CVMFS/Compute Canada
         real_dlsym = dlvsym(RTLD_NEXT,"dlsym","GLIBC_2.2.5");
         if (real_dlsym == NULL) {
-            real_dlsym = dlvsym(RTLD_NEXT,"dlsym",NULL);
+            real_dlsym = dlvsym(RTLD_NEXT,"dlsym","");
         }
         if (real_dlsym == NULL) {
             const char *glibc_versions[] = {"GLIBC_2.34", "GLIBC_2.17", "GLIBC_2.4", NULL};
@@ -303,7 +303,7 @@ void load_nvml_libraries() {
             void *libdl = dlopen("libdl.so.2", RTLD_LAZY | RTLD_LOCAL);
             if (libdl != NULL) {
                 typedef void* (*dlsym_fn)(void*, const char*);
-                dlsym_fn libdl_dlsym = (dlsym_fn)dlvsym(libdl, "dlsym", NULL);
+                dlsym_fn libdl_dlsym = (dlsym_fn)dlvsym(libdl, "dlsym", "");
                 if (libdl_dlsym == NULL) {
                     libdl_dlsym = (dlsym_fn)dlvsym(libdl, "dlsym", "GLIBC_2.2.5");
                 }

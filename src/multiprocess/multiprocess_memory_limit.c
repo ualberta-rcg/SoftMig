@@ -47,6 +47,9 @@ size_t initial_offset=0;
 // Flag to track if softmig is disabled (when env vars are not set)
 static int softmig_disabled = -1;  // -1 = not checked yet, 0 = enabled, 1 = disabled
 
+// External function from config_file.c - reads from config file or env
+extern int is_softmig_configured(void);
+
 // Helper function to check if softmig is enabled
 static int is_softmig_enabled(void) {
     if (softmig_disabled == -1) {
@@ -92,7 +95,6 @@ void sig_swap_stub(int signo){
 
 // External function from config_file.c - reads from config file or env
 extern size_t get_limit_from_config_or_env(const char* env_name);
-extern int is_softmig_configured(void);
 
 // get device memory from config file (priority) or env (fallback)
 // This is now a wrapper that calls the config file reader
@@ -123,7 +125,8 @@ int load_env_from_file(char *filename) {
     char tmp[10000];
     int cursor=0;
     while (!feof(f)){
-        fgets(tmp,10000,f);
+        if (fgets(tmp,10000,f) == NULL)
+            break;
         if (strstr(tmp,"=")==NULL)
             break;
         if (tmp[strlen(tmp)-1]=='\n')
@@ -144,8 +147,8 @@ void do_init_device_memory_limits(uint64_t* arr, int len) {
     int i;
     for (i = 0; i < len; ++i) {
         char env_name[CUDA_DEVICE_MEMORY_LIMIT_KEY_LENGTH] = CUDA_DEVICE_MEMORY_LIMIT;
-        char index_name[8];
-        snprintf(index_name, 8, "_%d", i);
+        char index_name[12];
+        snprintf(index_name, 12, "_%d", i);
         strcat(env_name, index_name);
         size_t cur_limit = get_limit_from_env(env_name);
         if (cur_limit > 0) {
@@ -164,8 +167,8 @@ void do_init_device_sm_limits(uint64_t *arr, int len) {
     int i;
     for (i = 0; i < len; ++i) {
         char env_name[CUDA_DEVICE_SM_LIMIT_KEY_LENGTH] = CUDA_DEVICE_SM_LIMIT;
-        char index_name[8];
-        snprintf(index_name, 8, "_%d", i);
+        char index_name[12];
+        snprintf(index_name, 12, "_%d", i);
         strcat(env_name, index_name);
         size_t cur_limit = get_limit_from_env(env_name);
         if (cur_limit > 0) {
@@ -723,7 +726,6 @@ void print_all() {
         LOG_INFO("softmig is disabled - no process information available");
         return;
     }
-    int i;
 }
 
 void child_reinit_flag() {
@@ -1034,9 +1036,7 @@ uint64_t get_current_device_memory_monitor(const int dev) {
 }
 
 uint64_t get_current_device_memory_usage(const int dev) {
-    clock_t start,finish;
     uint64_t result;
-    start = clock();
     ensure_initialized();
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return 0;  // No usage tracking when softmig is disabled

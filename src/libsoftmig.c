@@ -77,7 +77,7 @@ static fp_dlsym get_real_dlsym_safe(void) {
     // Method 1: Try dlvsym with RTLD_NEXT (most reliable, avoids our hook)
     result = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
     if (result == NULL) {
-        result = dlvsym(RTLD_NEXT, "dlsym", NULL);
+        result = dlvsym(RTLD_NEXT, "dlsym", "");
     }
     if (result == NULL) {
         const char *glibc_versions[] = {"GLIBC_2.34", "GLIBC_2.17", "GLIBC_2.4", NULL};
@@ -88,7 +88,7 @@ static fp_dlsym get_real_dlsym_safe(void) {
     
     // Method 2: Try dlvsym with RTLD_DEFAULT (system default namespace)
     if (result == NULL) {
-        result = dlvsym(RTLD_DEFAULT, "dlsym", NULL);
+        result = dlvsym(RTLD_DEFAULT, "dlsym", "");
         if (result == NULL) {
             result = dlvsym(RTLD_DEFAULT, "dlsym", "GLIBC_2.2.5");
         }
@@ -99,7 +99,7 @@ static fp_dlsym get_real_dlsym_safe(void) {
         void *libdl = dlopen("libdl.so.2", RTLD_LAZY | RTLD_LOCAL);
         if (libdl != NULL) {
             // Get dlsym symbol directly from libdl using dlvsym
-            result = (fp_dlsym)dlvsym(libdl, "dlsym", NULL);
+            result = (fp_dlsym)dlvsym(libdl, "dlsym", "");
             if (result == NULL) {
                 result = (fp_dlsym)dlvsym(libdl, "dlsym", "GLIBC_2.2.5");
             }
@@ -155,7 +155,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
         real_dlsym = get_real_dlsym_safe();
         if (real_dlsym == NULL) {
             // Last resort: try to call system dlsym via dlvsym (may not work but won't crash)
-            fp_dlsym sys_dlsym = (fp_dlsym)dlvsym(RTLD_DEFAULT, "dlsym", NULL);
+            fp_dlsym sys_dlsym = (fp_dlsym)dlvsym(RTLD_DEFAULT, "dlsym", "");
             if (sys_dlsym != NULL && sys_dlsym != dlsym) {
                 return sys_dlsym(handle, symbol);
             }
@@ -235,14 +235,20 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuCtxGetCurrent);
     DLSYM_HOOK_FUNC(cuCtxGetFlags);
     DLSYM_HOOK_FUNC(cuCtxGetLimit);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     DLSYM_HOOK_FUNC(cuCtxGetSharedMemConfig);
+#pragma GCC diagnostic pop
     DLSYM_HOOK_FUNC(cuCtxGetStreamPriorityRange);
     DLSYM_HOOK_FUNC(cuCtxPopCurrent_v2);
     DLSYM_HOOK_FUNC(cuCtxPushCurrent_v2);
     DLSYM_HOOK_FUNC(cuCtxSetCacheConfig);
     DLSYM_HOOK_FUNC(cuCtxSetCurrent);
     DLSYM_HOOK_FUNC(cuCtxSetLimit);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     DLSYM_HOOK_FUNC(cuCtxSetSharedMemConfig);
+#pragma GCC diagnostic pop
     DLSYM_HOOK_FUNC(cuCtxSynchronize);
     //DLSYM_HOOK_FUNC(cuCtxEnablePeerAccess);
     //DLSYM_HOOK_FUNC(cuGetExportTable);
@@ -282,7 +288,10 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuPointerGetAttribute);
     DLSYM_HOOK_FUNC(cuPointerSetAttribute);
     DLSYM_HOOK_FUNC(cuFuncSetCacheConfig);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     DLSYM_HOOK_FUNC(cuFuncSetSharedMemConfig);
+#pragma GCC diagnostic pop
     DLSYM_HOOK_FUNC(cuFuncGetAttribute);
     DLSYM_HOOK_FUNC(cuFuncSetAttribute);
     DLSYM_HOOK_FUNC(cuLaunchKernel);
@@ -326,8 +335,11 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuModuleGetFunction);
     DLSYM_HOOK_FUNC(cuModuleUnload);
     DLSYM_HOOK_FUNC(cuModuleGetGlobal_v2);
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     DLSYM_HOOK_FUNC(cuModuleGetTexRef);
     DLSYM_HOOK_FUNC(cuModuleGetSurfRef);
+#pragma GCC diagnostic pop
     DLSYM_HOOK_FUNC(cuLinkAddData_v2);
     DLSYM_HOOK_FUNC(cuLinkCreate_v2);
     DLSYM_HOOK_FUNC(cuLinkAddFile_v2);
