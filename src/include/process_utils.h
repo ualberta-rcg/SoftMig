@@ -21,5 +21,10 @@ uid_t proc_get_uid(int32_t pid);
 // Check if a process is alive
 int proc_alive(int32_t pid);
 
+// Check if a process belongs to the same cgroup session as the current process
+// Returns 1 if process belongs to same session, 0 if not, -1 on error (fallback to UID)
+// Supports both cgroups v1 and v2
+int proc_belongs_to_current_cgroup_session(int32_t pid);
+
 
 #endif  // __UTILS_PROCESS_UTILS_H__

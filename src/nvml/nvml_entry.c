@@ -52,13 +52,13 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
     return ret;
   }
   
-  // Filter by current user (unless root)
+  // Filter by current cgroup session (or UID if not in cgroup, unless root)
   uid_t current_uid = getuid();
   unsigned int filtered_count = 0;
   unsigned int max_output = *infoCount;  // Save the output buffer size
   int is_root = (current_uid == 0);  // Root user (UID 0) sees all processes
   
-  // Iterate through ALL processes and filter by UID (unless root)
+  // Iterate through ALL processes and filter by cgroup session or UID (unless root)
   for (unsigned int i = 0; i < temp_count; i++) {
     if (is_root) {
       // Root user sees all processes - include all
@@ -70,10 +70,23 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
         break;
       }
     } else {
-      // Non-root users only see their own processes
-      uid_t proc_uid = proc_get_uid(all_infos[i].pid);
-      if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
-        // Process belongs to current user - include it
+      // Non-root users: filter by cgroup session first, fall back to UID
+      int cgroup_check = proc_belongs_to_current_cgroup_session(all_infos[i].pid);
+      int should_include = 0;
+      
+      if (cgroup_check == 1) {
+        // Process belongs to current cgroup session - include it
+        should_include = 1;
+      } else if (cgroup_check == -1) {
+        // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
+        uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+        if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+          should_include = 1;
+        }
+      }
+      // cgroup_check == 0 means different cgroup session - exclude it
+      
+      if (should_include) {
         if (infos != NULL && filtered_count < max_output) {
           infos[filtered_count] = all_infos[i];
         }
@@ -1605,13 +1618,13 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     return ret;
   }
   
-  // Filter by current user (unless root)
+  // Filter by current cgroup session (or UID if not in cgroup, unless root)
   uid_t current_uid = getuid();
   unsigned int filtered_count = 0;
   unsigned int max_output = *infoCount;  // Save the output buffer size
   int is_root = (current_uid == 0);  // Root user (UID 0) sees all processes
   
-  // Iterate through ALL processes and filter by UID (unless root)
+  // Iterate through ALL processes and filter by cgroup session or UID (unless root)
   for (unsigned int i = 0; i < temp_count; i++) {
     if (is_root) {
       // Root user sees all processes - include all
@@ -1623,10 +1636,23 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
         break;
       }
     } else {
-      // Non-root users only see their own processes
-      uid_t proc_uid = proc_get_uid(all_infos[i].pid);
-      if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
-        // Process belongs to current user - include it
+      // Non-root users: filter by cgroup session first, fall back to UID
+      int cgroup_check = proc_belongs_to_current_cgroup_session(all_infos[i].pid);
+      int should_include = 0;
+      
+      if (cgroup_check == 1) {
+        // Process belongs to current cgroup session - include it
+        should_include = 1;
+      } else if (cgroup_check == -1) {
+        // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
+        uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+        if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+          should_include = 1;
+        }
+      }
+      // cgroup_check == 0 means different cgroup session - exclude it
+      
+      if (should_include) {
         if (infos != NULL && filtered_count < max_output) {
           infos[filtered_count] = all_infos[i];
         }

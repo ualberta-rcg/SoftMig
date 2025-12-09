@@ -47,6 +47,9 @@ size_t initial_offset=0;
 // Flag to track if softmig is disabled (when env vars are not set)
 static int softmig_disabled = -1;  // -1 = not checked yet, 0 = enabled, 1 = disabled
 
+// External function from config_file.c - reads from config file or env
+extern int is_softmig_configured(void);
+
 // Helper function to check if softmig is enabled
 static int is_softmig_enabled(void) {
     if (softmig_disabled == -1) {
@@ -92,7 +95,6 @@ void sig_swap_stub(int signo){
 
 // External function from config_file.c - reads from config file or env
 extern size_t get_limit_from_config_or_env(const char* env_name);
-extern int is_softmig_configured(void);
 
 // get device memory from config file (priority) or env (fallback)
 // This is now a wrapper that calls the config file reader
@@ -123,7 +125,8 @@ int load_env_from_file(char *filename) {
     char tmp[10000];
     int cursor=0;
     while (!feof(f)){
-        fgets(tmp,10000,f);
+        if (fgets(tmp,10000,f) == NULL)
+            break;
         if (strstr(tmp,"=")==NULL)
             break;
         if (tmp[strlen(tmp)-1]=='\n')
@@ -144,8 +147,8 @@ void do_init_device_memory_limits(uint64_t* arr, int len) {
     int i;
     for (i = 0; i < len; ++i) {
         char env_name[CUDA_DEVICE_MEMORY_LIMIT_KEY_LENGTH] = CUDA_DEVICE_MEMORY_LIMIT;
-        char index_name[8];
-        snprintf(index_name, 8, "_%d", i);
+        char index_name[12];
+        snprintf(index_name, 12, "_%d", i);
         strcat(env_name, index_name);
         size_t cur_limit = get_limit_from_env(env_name);
         if (cur_limit > 0) {
@@ -164,8 +167,8 @@ void do_init_device_sm_limits(uint64_t *arr, int len) {
     int i;
     for (i = 0; i < len; ++i) {
         char env_name[CUDA_DEVICE_SM_LIMIT_KEY_LENGTH] = CUDA_DEVICE_SM_LIMIT;
-        char index_name[8];
-        snprintf(index_name, 8, "_%d", i);
+        char index_name[12];
+        snprintf(index_name, 12, "_%d", i);
         strcat(env_name, index_name);
         size_t cur_limit = get_limit_from_env(env_name);
         if (cur_limit > 0) {
@@ -337,26 +340,37 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
     const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;
     
-    // Get current user's UID to filter processes
+    // Get current user's UID for fallback filtering
     uid_t current_uid = getuid();
     
-    // Sum up memory from all processes belonging to current user
+    // Sum up memory from all processes belonging to current SLURM job (or current user if not in SLURM)
     for (unsigned int i = 0; i < process_count; i++) {
-        // Check if process belongs to current user
-        uid_t proc_uid = proc_get_uid(infos[i].pid);
+        // First try to check if process belongs to current cgroup session
+        int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
         
-        if (proc_uid == (uid_t)-1) {
-            // Couldn't read UID - skip this process to avoid blocking on shared region lock
-            // We don't want to block nvidia-smi or other tools if another process is holding the lock
-            // If the process belongs to us, it will be counted when we can read its UID
-            LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - could not read UID, skipping (avoiding lock contention)", 
+        if (cgroup_check == -1) {
+            // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
+            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            
+            if (proc_uid == (uid_t)-1) {
+                // Couldn't read UID - skip this process to avoid blocking on shared region lock
+                // We don't want to block nvidia-smi or other tools if another process is holding the lock
+                // If the process belongs to us, it will be counted when we can read its UID
+                LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - could not read UID, skipping (avoiding lock contention)", 
+                         infos[i].pid);
+                continue;
+            } else if (proc_uid != current_uid) {
+                LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - skipping (UID %u != current UID %u)", 
+                         infos[i].pid, proc_uid, current_uid);
+                continue;
+            }
+        } else if (cgroup_check == 0) {
+            // Process is in a different cgroup session - skip it
+            LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - skipping (different cgroup session)", 
                      infos[i].pid);
             continue;
-        } else if (proc_uid != current_uid) {
-            LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - skipping (UID %u != current UID %u)", 
-                     infos[i].pid, proc_uid, current_uid);
-            continue;
         }
+        // cgroup_check == 1 means process belongs to current cgroup session - include it
         
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
@@ -712,7 +726,6 @@ void print_all() {
         LOG_INFO("softmig is disabled - no process information available");
         return;
     }
-    int i;
 }
 
 void child_reinit_flag() {
@@ -1023,9 +1036,7 @@ uint64_t get_current_device_memory_monitor(const int dev) {
 }
 
 uint64_t get_current_device_memory_usage(const int dev) {
-    clock_t start,finish;
     uint64_t result;
-    start = clock();
     ensure_initialized();
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return 0;  // No usage tracking when softmig is disabled

@@ -58,6 +58,7 @@ static char* get_unified_lock_path(void) {
     // Create directory if needed
     char dir_path[512];
     strncpy(dir_path, lock_path, sizeof(dir_path) - 1);
+    dir_path[sizeof(dir_path) - 1] = '\0';
     char* last_slash = strrchr(dir_path, '/');
     if (last_slash != NULL) {
         *last_slash = '\0';
