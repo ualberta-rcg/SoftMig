@@ -462,15 +462,17 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
         return NVML_SUCCESS;
     }
     
-    // Sum memory usage directly from NVML processes (more accurate than tracking)
-    uint64_t usage = sum_process_memory_from_nvml(device);
+    // Use tracked usage (updated atomically) instead of querying NVML directly
+    // This prevents race conditions where multiple processes see the same "available" memory
+    // The tracked usage is updated atomically when allocations happen (with lock_shrreg held)
+    uint64_t usage = get_current_device_memory_usage(cudadev);
     
-    // Fallback to tracked usage if NVML query failed
-    if (usage == 0) {
-        LOG_INFO("sum_process_memory_from_nvml returned 0, falling back to tracked usage");
-        usage = get_current_device_memory_usage(cudadev);
-        LOG_INFO("Tracked usage fallback: %llu bytes (%.2f MiB)", 
-                 (unsigned long long)usage, usage / (1024.0 * 1024.0));
+    // For validation/logging, also check NVML (but don't use it for enforcement)
+    uint64_t nvml_usage = sum_process_memory_from_nvml(device);
+    if (nvml_usage > 0 && nvml_usage != usage) {
+        LOG_DEBUG("Tracked usage (%llu bytes, %.2f MiB) differs from NVML usage (%llu bytes, %.2f MiB)",
+                 (unsigned long long)usage, usage / (1024.0 * 1024.0),
+                 (unsigned long long)nvml_usage, nvml_usage / (1024.0 * 1024.0));
     }
     
     // Ensure usage doesn't exceed limit

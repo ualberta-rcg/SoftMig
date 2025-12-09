@@ -2,10 +2,13 @@
 #include "include/log_utils.h"
 #include "include/libcuda_hook.h"
 #include "multiprocess/multiprocess_memory_limit.h"
+#include <signal.h>
+#include <unistd.h>
 
 // Forward declarations for lock functions
 extern void lock_shrreg();
 extern void unlock_shrreg();
+extern int enable_active_oom_killer;
 
 
 size_t BITSIZE = 512;
@@ -37,7 +40,8 @@ size_t round_up(size_t size, size_t unit) {
     return size;
 }
 
-int oom_check(const int dev, size_t addon) {
+// Internal function that doesn't lock (caller must hold lock_shrreg)
+int oom_check_nolock(const int dev, size_t addon) {
     int count1=0;
     CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetCount,&count1);
     CUdevice d;
@@ -46,7 +50,8 @@ int oom_check(const int dev, size_t addon) {
     else
         d=dev;
     uint64_t limit = get_current_device_memory_limit(d);
-    size_t _usage = get_gpu_memory_usage(d);
+    // Use get_gpu_memory_usage_nolock when we're already holding the lock
+    size_t _usage = get_gpu_memory_usage_nolock(d);
 
     if (limit == 0) {
         return 0;
@@ -55,13 +60,41 @@ int oom_check(const int dev, size_t addon) {
     size_t new_allocated = _usage + addon;
     LOG_INFO("_usage=%lu limit=%lu new_allocated=%lu",_usage,limit,new_allocated);
     if (new_allocated > limit) {
-        LOG_ERROR("Device %d OOM %lu / %lu", d, new_allocated, limit);
-
-        if (clear_proc_slot_nolock(1) > 0)
-            return oom_check(dev,addon);
+        LOG_ERROR("Device %d OOM %lu / %lu (trying to allocate %lu bytes)", d, new_allocated, limit, addon);
+        
+        // Try to clear dead processes first
+        if (clear_proc_slot_nolock(1) > 0) {
+            // Recheck after clearing dead processes
+            _usage = get_gpu_memory_usage_nolock(d);
+            new_allocated = _usage + addon;
+            if (new_allocated <= limit) {
+                LOG_INFO("After clearing dead processes, allocation now allowed: %lu / %lu", new_allocated, limit);
+                return 0;  // Allocation is now possible
+            }
+        }
+        
+        // If still OOM and OOM killer is enabled, kill the current process
+        if (enable_active_oom_killer) {
+            pid_t current_pid = getpid();
+            LOG_ERROR("OOM detected and ACTIVE_OOM_KILLER enabled - killing process %d (tried to allocate %lu bytes, would exceed limit %lu)", 
+                     current_pid, addon, limit);
+            // Send SIGKILL to current process
+            kill(current_pid, SIGKILL);
+            // If kill() returns, something went wrong, but we'll still return error
+            // Give it a moment to terminate
+            usleep(100000);  // 100ms
+        }
+        
         return 1;
     }
     return 0;
+}
+
+int oom_check(const int dev, size_t addon) {
+    lock_shrreg();
+    int result = oom_check_nolock(dev, addon);
+    unlock_shrreg();
+    return result;
 }
 
 CUresult view_vgpu_allocator() {
@@ -117,8 +150,8 @@ int add_chunk(CUdeviceptr *address, size_t size) {
     // Lock shared region for atomic check+allocate+update
     lock_shrreg();
     
-    // Check OOM while holding both locks (atomic with allocation)
-    if (oom_check(dev,size)) {
+    // Check OOM while holding lock (use nolock version to avoid deadlock)
+    if (oom_check_nolock(dev,size)) {
         unlock_shrreg();
         return CUDA_ERROR_OUT_OF_MEMORY;
     }

@@ -241,18 +241,27 @@ size_t get_gpu_memory_monitor(const int dev) {
     return total;
 }
 
-size_t get_gpu_memory_usage(const int dev) {
-    ensure_initialized();
+// Get memory usage without locking (caller must hold lock_shrreg)
+size_t get_gpu_memory_usage_nolock(const int dev) {
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return 0;
     }
     int i=0;
     size_t total=0;
-    lock_shrreg();
     for (i=0;i<region_info.shared_region->proc_num;i++){
         total+=region_info.shared_region->procs[i].used[dev].total;
     }
     total+=initial_offset;
+    return total;
+}
+
+size_t get_gpu_memory_usage(const int dev) {
+    ensure_initialized();
+    if (!is_softmig_enabled() || region_info.shared_region == NULL) {
+        return 0;
+    }
+    lock_shrreg();
+    size_t total = get_gpu_memory_usage_nolock(dev);
     unlock_shrreg();
     return total;
 }
