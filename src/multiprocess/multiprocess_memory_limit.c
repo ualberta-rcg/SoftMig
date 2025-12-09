@@ -320,6 +320,23 @@ int init_gpu_device_utilization(){
     return 1;
 }
 
+// Forward declaration for sum_process_memory_from_nvml from nvml hook
+extern uint64_t sum_process_memory_from_nvml(nvmlDevice_t device);
+
+// Get summed memory usage from NVML for a CUDA device index
+// This uses the same calculation as nvmlDeviceGetMemoryInfo (9MB min + 5% overhead + UID filtering)
+uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
+    unsigned int nvml_dev_idx = cuda_to_nvml_map(cuda_dev);
+    nvmlDevice_t ndev;
+    nvmlReturn_t ret = nvmlDeviceGetHandleByIndex(nvml_dev_idx, &ndev);
+    if (ret != NVML_SUCCESS) {
+        LOG_DEBUG("get_summed_device_memory_usage_from_nvml: NVML get device %d (CUDA %d) error, %s", 
+                 nvml_dev_idx, cuda_dev, nvmlErrorString(ret));
+        return 0;  // Return 0 to trigger fallback
+    }
+    return sum_process_memory_from_nvml(ndev);
+}
+
 uint64_t nvml_get_device_memory_usage(const int dev) {
     nvmlDevice_t ndev;
     nvmlReturn_t ret;

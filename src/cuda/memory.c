@@ -7,6 +7,9 @@
 #include "include/libcuda_hook.h"
 #include "include/libsoftmig.h"
 #include "include/memory_limit.h"
+#include "multiprocess/multiprocess_memory_limit.h"
+// Forward declaration for sum_process_memory_from_nvml
+extern uint64_t sum_process_memory_from_nvml(void* device);
 
 extern int pidfound;
 
@@ -497,8 +500,26 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo(size_t* free, size_t* total) {
     LOG_DEBUG("cuMemGetInfo");
     ENSURE_INITIALIZED();
     CHECK_DRV_API(cuCtxGetDevice(&dev));
-    size_t usage = get_current_device_memory_usage(cuda_to_nvml_map(dev));
-    size_t limit = get_current_device_memory_limit(cuda_to_nvml_map(dev));
+    
+    unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
+    size_t limit = get_current_device_memory_limit(nvml_dev_idx);
+    
+    // Use summed NVML usage (with 9MB minimum + 5% overhead and UID filtering)
+    // This ensures all processes see the same consistent usage value
+    uint64_t usage = get_summed_device_memory_usage_from_nvml(dev);
+    
+    // Fallback to tracked usage if NVML query failed or returned 0
+    if (usage == 0) {
+        LOG_DEBUG("cuMemGetInfo: sum_process_memory_from_nvml returned 0, falling back to tracked usage");
+        usage = get_current_device_memory_usage(nvml_dev_idx);
+    }
+    
+    // Try to get the actual summed value - we need NVML device handle
+    // Since we're in CUDA code, we can't easily access NVML device handles
+    // We'll need to either:
+    // 1. Export a function that takes CUDA device and returns summed usage
+    // 2. Or use the tracked usage (which should be updated)
+    // For now, let's create a helper function in multiprocess_memory_limit that does this
     
     // Check if real cuMemGetInfo exists, otherwise fall back to cuMemGetInfo_v2
     void* real_fn = CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo);
@@ -536,8 +557,19 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo_v2(size_t* free, size_t* total) {
     LOG_DEBUG("cuMemGetInfo_v2");
     ENSURE_INITIALIZED();
     CHECK_DRV_API(cuCtxGetDevice(&dev));
-    size_t usage = get_current_device_memory_usage(cuda_to_nvml_map(dev));
-    size_t limit = get_current_device_memory_limit(cuda_to_nvml_map(dev));
+    
+    unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
+    size_t limit = get_current_device_memory_limit(nvml_dev_idx);
+    
+    // Use summed NVML usage (with 9MB minimum + 5% overhead and UID filtering)
+    // This ensures all processes see the same consistent usage value
+    uint64_t usage = get_summed_device_memory_usage_from_nvml(dev);
+    
+    // Fallback to tracked usage if NVML query failed or returned 0
+    if (usage == 0) {
+        LOG_DEBUG("cuMemGetInfo_v2: sum_process_memory_from_nvml returned 0, falling back to tracked usage");
+        usage = get_current_device_memory_usage(nvml_dev_idx);
+    }
     if (limit == 0) {
         CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo_v2, free, total);
         LOG_INFO("orig free=%ld total=%ld", *free, *total);
