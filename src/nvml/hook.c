@@ -398,21 +398,13 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
         uid_t proc_uid = proc_get_uid(infos[i].pid);
         
         if (proc_uid == (uid_t)-1) {
-            // Couldn't read UID - try fallback: check if PID is in our tracked processes
-            // (processes in shared region belong to current user)
-            shrreg_proc_slot_t *proc = find_proc_by_hostpid(infos[i].pid);
-            if (proc == NULL) {
-                // Also check by pid field (not just hostpid)
-                // We need to search the shared region, but can't access it directly
-                // For now, skip if we can't read UID - improved logging will show this
-                LOG_INFO("  Process[%u] PID=%u: skipping (could not read UID from /proc/%d/status)", 
-                         i, infos[i].pid, infos[i].pid);
-                skipped_count++;
-                continue;
-            } else {
-                LOG_INFO("  Process[%u] PID=%u: including (could not read UID, but found in tracked processes via hostpid)", 
-                         i, infos[i].pid);
-            }
+            // Couldn't read UID - skip this process to avoid blocking on shared region lock
+            // We don't want to block nvidia-smi if another process is holding the lock
+            // If the process belongs to us, it will be counted when we can read its UID
+            LOG_DEBUG("  Process[%u] PID=%u: skipping (could not read UID from /proc/%d/status - avoiding lock contention)", 
+                     i, infos[i].pid, infos[i].pid);
+            skipped_count++;
+            continue;
         } else if (proc_uid != current_uid) {
             LOG_INFO("  Process[%u] PID=%u: skipping (UID %u != current UID %u)", 
                      i, infos[i].pid, proc_uid, current_uid);

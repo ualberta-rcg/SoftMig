@@ -52,25 +52,44 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
     return ret;
   }
   
-  // Filter by current user
+  // Filter by current user (unless root)
   uid_t current_uid = getuid();
   unsigned int filtered_count = 0;
+  unsigned int max_output = *infoCount;  // Save the output buffer size
+  int is_root = (current_uid == 0);  // Root user (UID 0) sees all processes
   
-  for (unsigned int i = 0; i < temp_count && filtered_count < *infoCount; i++) {
-    uid_t proc_uid = proc_get_uid(all_infos[i].pid);
-    if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
-      // Process belongs to current user - include it
-      if (infos != NULL) {
+  // Iterate through ALL processes and filter by UID (unless root)
+  for (unsigned int i = 0; i < temp_count; i++) {
+    if (is_root) {
+      // Root user sees all processes - include all
+      if (infos != NULL && filtered_count < max_output) {
         infos[filtered_count] = all_infos[i];
       }
       filtered_count++;
+      if (filtered_count >= max_output && infos != NULL) {
+        break;
+      }
+    } else {
+      // Non-root users only see their own processes
+      uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+      if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+        // Process belongs to current user - include it
+        if (infos != NULL && filtered_count < max_output) {
+          infos[filtered_count] = all_infos[i];
+        }
+        filtered_count++;
+        // Stop if output buffer is full
+        if (filtered_count >= max_output && infos != NULL) {
+          break;
+        }
+      }
     }
   }
   
   *infoCount = filtered_count;
   
   // Return appropriate status
-  if (ret == NVML_ERROR_INSUFFICIENT_SIZE || filtered_count < temp_count) {
+  if (ret == NVML_ERROR_INSUFFICIENT_SIZE || (!is_root && filtered_count < temp_count)) {
     // Some processes were filtered out, but we have results
     return NVML_SUCCESS;
   }
@@ -1586,25 +1605,44 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     return ret;
   }
   
-  // Filter by current user
+  // Filter by current user (unless root)
   uid_t current_uid = getuid();
   unsigned int filtered_count = 0;
+  unsigned int max_output = *infoCount;  // Save the output buffer size
+  int is_root = (current_uid == 0);  // Root user (UID 0) sees all processes
   
-  for (unsigned int i = 0; i < temp_count && filtered_count < *infoCount; i++) {
-    uid_t proc_uid = proc_get_uid(all_infos[i].pid);
-    if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
-      // Process belongs to current user - include it
-      if (infos != NULL) {
+  // Iterate through ALL processes and filter by UID (unless root)
+  for (unsigned int i = 0; i < temp_count; i++) {
+    if (is_root) {
+      // Root user sees all processes - include all
+      if (infos != NULL && filtered_count < max_output) {
         infos[filtered_count] = all_infos[i];
       }
       filtered_count++;
+      if (filtered_count >= max_output && infos != NULL) {
+        break;
+      }
+    } else {
+      // Non-root users only see their own processes
+      uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+      if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+        // Process belongs to current user - include it
+        if (infos != NULL && filtered_count < max_output) {
+          infos[filtered_count] = all_infos[i];
+        }
+        filtered_count++;
+        // Stop if output buffer is full
+        if (filtered_count >= max_output && infos != NULL) {
+          break;
+        }
+      }
     }
   }
   
   *infoCount = filtered_count;
   
   // Return appropriate status
-  if (ret == NVML_ERROR_INSUFFICIENT_SIZE || filtered_count < temp_count) {
+  if (ret == NVML_ERROR_INSUFFICIENT_SIZE || (!is_root && filtered_count < temp_count)) {
     // Some processes were filtered out, but we have results
     return NVML_SUCCESS;
   }

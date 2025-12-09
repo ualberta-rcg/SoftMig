@@ -357,16 +357,12 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
         uid_t proc_uid = proc_get_uid(infos[i].pid);
         
         if (proc_uid == (uid_t)-1) {
-            // Couldn't read UID - try fallback: check if PID is in our tracked processes
-            shrreg_proc_slot_t *proc = find_proc_by_hostpid(infos[i].pid);
-            if (proc == NULL) {
-                LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - could not read UID and not in tracked processes, skipping", 
-                         infos[i].pid);
-                continue;
-            } else {
-                LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - including (could not read UID, but found in tracked processes)", 
-                         infos[i].pid);
-            }
+            // Couldn't read UID - skip this process to avoid blocking on shared region lock
+            // We don't want to block nvidia-smi or other tools if another process is holding the lock
+            // If the process belongs to us, it will be counted when we can read its UID
+            LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - could not read UID, skipping (avoiding lock contention)", 
+                     infos[i].pid);
+            continue;
         } else if (proc_uid != current_uid) {
             LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - skipping (UID %u != current UID %u)", 
                      infos[i].pid, proc_uid, current_uid);
