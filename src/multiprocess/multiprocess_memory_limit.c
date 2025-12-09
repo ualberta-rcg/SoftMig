@@ -414,7 +414,7 @@ int fix_lock_shrreg() {
         int flag = 0;
         if (current_owner == region_info.pid) {
             // Detect owner pid = self pid
-                "indicates pid loopback or race condition", current_owner);
+            LOG_WARN("Owner pid equals self pid (%d), indicates pid loopback or race condition", current_owner);
             flag = 1;
         } else {
             int proc_status = proc_alive(current_owner);
