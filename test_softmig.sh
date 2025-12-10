@@ -18,6 +18,119 @@ if [ -z "$CUDA_HOME" ]; then
     fi
 fi
 
+# Find libcuda.so location
+find_libcuda() {
+    # Try common locations
+    local libcuda_paths=(
+        "/usr/lib64/libcuda.so"
+        "/usr/lib64/libcuda.so.1"
+        "/usr/lib/x86_64-linux-gnu/libcuda.so"
+        "/usr/lib/x86_64-linux-gnu/libcuda.so.1"
+        "/usr/lib/libcuda.so"
+        "/usr/lib/libcuda.so.1"
+    )
+    
+    # Also check CUDA_HOME if set
+    if [ -n "$CUDA_HOME" ]; then
+        libcuda_paths+=(
+            "$CUDA_HOME/lib64/libcuda.so"
+            "$CUDA_HOME/lib64/libcuda.so.1"
+            "$CUDA_HOME/lib/libcuda.so"
+            "$CUDA_HOME/lib/libcuda.so.1"
+        )
+    fi
+    
+    # Try to find using ldconfig if available
+    if command -v ldconfig >/dev/null 2>&1; then
+        local ldconfig_path=$(ldconfig -p 2>/dev/null | grep -E "libcuda\.so" | head -1 | awk '{print $NF}')
+        if [ -n "$ldconfig_path" ] && [ -f "$ldconfig_path" ]; then
+            echo "$ldconfig_path"
+            return 0
+        fi
+    fi
+    
+    # Check each path
+    for path in "${libcuda_paths[@]}"; do
+        if [ -f "$path" ]; then
+            echo "$path"
+            return 0
+        fi
+    done
+    
+    # Last resort: try to find using find command (slow, but comprehensive)
+    local found=$(find /usr/lib* /lib* 2>/dev/null -name "libcuda.so*" -type f 2>/dev/null | head -1)
+    if [ -n "$found" ] && [ -f "$found" ]; then
+        echo "$found"
+        return 0
+    fi
+    
+    # If nothing found, return libcuda.so and let the system try to find it
+    echo "libcuda.so"
+    return 1
+}
+
+# Find and export libcuda path
+LIBCUDA_PATH=$(find_libcuda)
+if [ "$LIBCUDA_PATH" != "libcuda.so" ]; then
+    echo "Found libcuda.so at: $LIBCUDA_PATH"
+    export LIBCUDA_PATH
+else
+    echo "Warning: Could not find libcuda.so, will try system default"
+    export LIBCUDA_PATH="libcuda.so"
+fi
+
+###############################################
+# CLEANUP FUNCTIONS
+###############################################
+
+# Array to store background process PIDs
+declare -a BACKGROUND_PIDS=()
+
+cleanup_background_processes() {
+    # Skip cleanup if SOFTMIG_KEEP_PROCESSES is set
+    if [ -n "$SOFTMIG_KEEP_PROCESSES" ]; then
+        echo ""
+        echo "=== Skipping cleanup (SOFTMIG_KEEP_PROCESSES is set) ==="
+        echo "  Background processes will continue running:"
+        for PID in "${BACKGROUND_PIDS[@]}"; do
+            if ps -p $PID > /dev/null 2>&1; then
+                echo "    PID $PID is still running"
+            fi
+        done
+        echo ""
+        return
+    fi
+    
+    echo ""
+    echo "=== Cleaning up background processes ==="
+    if [ ${#BACKGROUND_PIDS[@]} -eq 0 ]; then
+        # Try to get PIDs from jobs if array is empty
+        BACKGROUND_PIDS=($(jobs -p 2>/dev/null))
+    fi
+    
+    if [ ${#BACKGROUND_PIDS[@]} -gt 0 ]; then
+        echo "  Killing ${#BACKGROUND_PIDS[@]} background process(es)..."
+        for PID in "${BACKGROUND_PIDS[@]}"; do
+            if ps -p $PID > /dev/null 2>&1; then
+                echo "    Killing PID $PID"
+                kill $PID 2>/dev/null
+                # Wait a bit, then force kill if still running
+                sleep 0.5
+                if ps -p $PID > /dev/null 2>&1; then
+                    kill -9 $PID 2>/dev/null
+                fi
+            fi
+        done
+        echo "  ✅ Cleanup complete"
+    else
+        echo "  No background processes found to clean up"
+    fi
+    echo ""
+}
+
+# Set up trap to cleanup on script exit (unless SOFTMIG_KEEP_PROCESSES is set)
+trap cleanup_background_processes EXIT INT TERM
+
 ###############################################
 # DIAGNOSTIC FUNCTIONS
 ###############################################
@@ -167,6 +280,7 @@ print("cudaMalloc: allocated 1GB, PID =", os.getpid())
 while True: time.sleep(10)
 EOF
 ) &
+BACKGROUND_PIDS+=($!)
 sleep 1
 echo "=== After Test 1: cudaMalloc ==="
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1
@@ -185,6 +299,7 @@ print("cudaMallocManaged: allocated 1GB, PID =", os.getpid())
 while True: time.sleep(10)
 EOF
 ) &
+BACKGROUND_PIDS+=($!)
 sleep 1
 echo "=== After Test 2: cudaMallocManaged ==="
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1
@@ -208,6 +323,7 @@ print("cudaMallocAsync: allocated 1GB, PID =", os.getpid())
 while True: time.sleep(10)
 EOF
 ) &
+BACKGROUND_PIDS+=($!)
 sleep 1
 echo "=== After Test 3: cudaMallocAsync ==="
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1
@@ -217,9 +333,10 @@ echo ""
 
 # 4) cuMemAlloc (driver API v1)
 (
-python3 - << 'EOF'
+python3 - << EOF
 import ctypes, os, time
-cu = ctypes.CDLL("libcuda.so")
+libcuda_path = os.environ.get("LIBCUDA_PATH", "libcuda.so")
+cu = ctypes.CDLL(libcuda_path)
 cu.cuInit(0)
 p = ctypes.c_void_p()
 cu.cuMemAlloc(ctypes.byref(p), 1024*1024*1024)
@@ -227,6 +344,7 @@ print("cuMemAlloc: allocated 1GB, PID =", os.getpid())
 while True: time.sleep(10)
 EOF
 ) &
+BACKGROUND_PIDS+=($!)
 sleep 1
 echo "=== After Test 4: cuMemAlloc ==="
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1
@@ -236,9 +354,10 @@ echo ""
 
 # 5) cuMemAllocManaged (driver API v2 UM)
 (
-python3 - << 'EOF'
+python3 - << EOF
 import ctypes, os, time
-cu = ctypes.CDLL("libcuda.so")
+libcuda_path = os.environ.get("LIBCUDA_PATH", "libcuda.so")
+cu = ctypes.CDLL(libcuda_path)
 cu.cuInit(0)
 p = ctypes.c_void_p()
 cu.cuMemAllocManaged(ctypes.byref(p), 1024*1024*1024, 1)
@@ -246,6 +365,7 @@ print("cuMemAllocManaged: allocated 1GB, PID =", os.getpid())
 while True: time.sleep(10)
 EOF
 ) &
+BACKGROUND_PIDS+=($!)
 sleep 1
 echo "=== After Test 5: cuMemAllocManaged ==="
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1
@@ -255,9 +375,10 @@ echo ""
 
 # 6) cuMemCreate + cuMemMap (VMM API — hardest to intercept)
 (
-python3 - << 'EOF'
+python3 - << EOF
 import ctypes, os, time
-cu = ctypes.CDLL("libcuda.so")
+libcuda_path = os.environ.get("LIBCUDA_PATH", "libcuda.so")
+cu = ctypes.CDLL(libcuda_path)
 cu.cuInit(0)
 
 size = 1024*1024*1024
@@ -274,6 +395,7 @@ print("cuMemCreate/cuMemMap: allocated 1GB, PID =", os.getpid())
 while True: time.sleep(10)
 EOF
 ) &
+BACKGROUND_PIDS+=($!)
 sleep 1
 echo "=== After Test 6: cuMemCreate/cuMemMap ==="
 nvidia-smi --query-gpu=index,name,memory.used,memory.total --format=csv,noheader 2>/dev/null | head -1
@@ -300,6 +422,8 @@ echo "  - SoftMig uses config files in /var/run/softmig/, not environment variab
 echo "  - If no config file exists, SoftMig runs in passive mode (no limits)"
 echo "  - To test properly, use applications that link against CUDA at compile time"
 echo "    (PyTorch, TensorFlow, or C programs) instead of ctypes.CDLL"
+echo "  - Background processes will be automatically cleaned up on script exit"
+echo "  - Set SOFTMIG_KEEP_PROCESSES=1 to keep processes running after script exits"
 echo ""
 ###############################################
 
