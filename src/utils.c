@@ -315,26 +315,18 @@ nvmlReturn_t set_task_pid() {
     }
     
     if (hostpid==0) {
-        LOG_ERROR("set_task_pid: FAILED - Current PID=%d, filtered processes=%u (previous=%u)", 
+        LOG_ERROR("set_task_pid: Current PID %d NOT found in NVML process list (filtered processes=%u, previous=%u)", 
                  current_pid, running_processes, previous);
         LOG_ERROR("set_task_pid: All PIDs in merged list:");
         for (i=0; i<running_processes && i<20; i++) {
             LOG_ERROR("  [%d]=%u %s", i, pids_on_device[i].pid,
                      (pids_on_device[i].pid == 0 || pids_on_device[i].pid == (unsigned int)-1) ? "(INVALID!)" : "");
         }
-        // Try one more fallback: use first valid PID if available (for cases where PID detection fails)
-        // This allows OOM killer to work even if PID detection is imperfect
-        for (i=0; i<running_processes; i++) {
-            if (pids_on_device[i].pid != 0 && pids_on_device[i].pid != (unsigned int)-1) {
-                LOG_WARN("set_task_pid: Using fallback - first valid PID from list: %u (current PID %d not found)", 
-                        pids_on_device[i].pid, current_pid);
-                hostpid = pids_on_device[i].pid;
-                break;
-            }
-        }
-        if (hostpid == 0) {
-            return NVML_ERROR_DRIVER_NOT_LOADED;
-        }
+        // Use getpid() directly as fallback - this is the actual current process PID
+        // The hostpid is used for memory tracking, so we must use the real PID, not a wrong one
+        // This can happen if the process hasn't created a CUDA context yet, or NVML returns corrupted data
+        LOG_WARN("set_task_pid: Using getpid() directly as fallback: %d (not found in NVML list)", current_pid);
+        hostpid = current_pid;
     }
     
     LOG_INFO("hostPid=%d",hostpid);
