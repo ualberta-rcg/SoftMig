@@ -7,9 +7,10 @@
 #include "include/log_utils.h"
 #include "include/nvml_prefix.h"
 // Don't include <nvml.h> directly - use nvml-subset.h through libnvml_hook.h to avoid conflicts
+// Include libnvml_hook.h first to get nvmlReturn_t defined before nvml_override.h uses it
+#include "include/libnvml_hook.h"  // This includes nvml-subset.h which has all needed types
 #include "include/nvml_override.h"
 #include "include/libcuda_hook.h"
-#include "include/libnvml_hook.h"  // This includes nvml-subset.h which has all needed types
 #include "multiprocess/multiprocess_memory_limit.h"
 
 // Note: fp1 is now defined in log_file.c to avoid linking issues with standalone tools
