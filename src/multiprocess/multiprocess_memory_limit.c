@@ -1057,7 +1057,6 @@ uint64_t get_current_device_memory_usage(const int dev) {
     }
     result = get_gpu_memory_usage(dev);
 //    result= nvml_get_device_memory_usage(dev);
-    finish=clock();
     return result;
 }
 

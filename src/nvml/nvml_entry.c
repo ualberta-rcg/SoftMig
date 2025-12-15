@@ -11,6 +11,14 @@ extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
 //extern resource_data_t g_vcuda_config;
 
+// Forward declarations for v2 functions
+nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
+                                                     unsigned int *infoCount,
+                                                     nvmlProcessInfo_t *infos);
+nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(nvmlDevice_t device,
+                                                     unsigned int *infoCount,
+                                                     nvmlProcessInfo_t *infos);
+
 nvmlReturn_t nvmlShutdown(void) {
   return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlShutdown);
 }
