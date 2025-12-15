@@ -121,16 +121,35 @@ int try_unlock_unified_lock() {
 int mergepid(unsigned int *prev, unsigned int *current, nvmlProcessInfo_t1 *sub, nvmlProcessInfo_t1 *merged) {
     int i,j;
     int found=0;
+    
+    // Validate input - skip invalid PIDs (0 or -1/UINT_MAX)
     for (i=0;i<*prev;i++){
+        // Skip invalid PIDs - these indicate corrupted or uninitialized data
+        if (sub[i].pid == 0 || sub[i].pid == (unsigned int)-1) {
+            LOG_DEBUG("mergepid: Skipping invalid PID %u at index %d", sub[i].pid, i);
+            continue;
+        }
+        
         found=0;
+        // Only check against already-merged valid PIDs
         for (j=0;j<*current;j++) {
+            // Also skip invalid PIDs in merged list during comparison
+            if (merged[j].pid == 0 || merged[j].pid == (unsigned int)-1) {
+                continue;
+            }
             if (sub[i].pid == merged[j].pid) {
                 found = 1;
                 break;
             } 
         }
         if (!found) {
+            // Check bounds before adding
+            if (*current >= SHARED_REGION_MAX_PROCESS_NUM) {
+                LOG_WARN("mergepid: Merged list full (%u), cannot add PID %u", *current, sub[i].pid);
+                break;
+            }
             merged[*current].pid = sub[i].pid;
+            merged[*current].usedGpuMemory = sub[i].usedGpuMemory;
             (*current)++;
         }
     }
@@ -183,6 +202,12 @@ nvmlReturn_t set_task_pid() {
     nvmlReturn_t res;
     CUcontext pctx;
     int i;
+    
+    // Initialize arrays to zero to avoid garbage values
+    memset(pre_pids_on_device, 0, sizeof(pre_pids_on_device));
+    memset(pids_on_device, 0, sizeof(pids_on_device));
+    memset(tmp_pids_on_device, 0, sizeof(tmp_pids_on_device));
+    
     CHECK_NVML_API(nvmlInit());
     CHECK_NVML_API(nvmlDeviceGetHandleByIndex(0, &device));
     
@@ -293,10 +318,23 @@ nvmlReturn_t set_task_pid() {
         LOG_ERROR("set_task_pid: FAILED - Current PID=%d, filtered processes=%u (previous=%u)", 
                  current_pid, running_processes, previous);
         LOG_ERROR("set_task_pid: All PIDs in merged list:");
-        for (i=0; i<running_processes; i++) {
-            LOG_ERROR("  [%d]=%u", i, pids_on_device[i].pid);
+        for (i=0; i<running_processes && i<20; i++) {
+            LOG_ERROR("  [%d]=%u %s", i, pids_on_device[i].pid,
+                     (pids_on_device[i].pid == 0 || pids_on_device[i].pid == (unsigned int)-1) ? "(INVALID!)" : "");
         }
-        return NVML_ERROR_DRIVER_NOT_LOADED;
+        // Try one more fallback: use first valid PID if available (for cases where PID detection fails)
+        // This allows OOM killer to work even if PID detection is imperfect
+        for (i=0; i<running_processes; i++) {
+            if (pids_on_device[i].pid != 0 && pids_on_device[i].pid != (unsigned int)-1) {
+                LOG_WARN("set_task_pid: Using fallback - first valid PID from list: %u (current PID %d not found)", 
+                        pids_on_device[i].pid, current_pid);
+                hostpid = pids_on_device[i].pid;
+                break;
+            }
+        }
+        if (hostpid == 0) {
+            return NVML_ERROR_DRIVER_NOT_LOADED;
+        }
     }
     
     LOG_INFO("hostPid=%d",hostpid);
