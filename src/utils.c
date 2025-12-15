@@ -218,9 +218,29 @@ nvmlReturn_t set_task_pid() {
         LOG_INFO("current pid in use is %d %d",i,pids_on_device[i].pid);
         //tmp_pids_on_device[i].pid=0;
     }
-    unsigned int hostpid = getextrapid(previous,running_processes,pre_pids_on_device,pids_on_device); 
+    
+    // With cgroup filtering, try to find our own PID first (most reliable in SLURM/cgroup environments)
+    pid_t current_pid = getpid();
+    unsigned int hostpid = 0;
+    
+    // Check if our PID is in the filtered process list (after creating CUDA context)
+    for (i=0; i<running_processes; i++) {
+        if (pids_on_device[i].pid == (unsigned int)current_pid) {
+            hostpid = current_pid;
+            LOG_INFO("Found current process PID %d in filtered GPU process list", current_pid);
+            break;
+        }
+    }
+    
+    // If not found, fall back to the old method (difference detection)
+    if (hostpid == 0) {
+        LOG_INFO("Current PID %d not found in filtered list, trying difference detection", current_pid);
+        hostpid = getextrapid(previous,running_processes,pre_pids_on_device,pids_on_device);
+    }
+    
     if (hostpid==0) {
-        LOG_ERROR("host pid is error!");
+        LOG_ERROR("host pid is error! Current PID=%d, filtered processes=%u, previous=%u", 
+                 current_pid, running_processes, previous);
         return NVML_ERROR_DRIVER_NOT_LOADED;
     }
     
