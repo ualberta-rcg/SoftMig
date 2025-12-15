@@ -16,6 +16,13 @@
 #include "include/log_utils.h"
 #include "include/nvml_prefix.h"
 
+// Alias for compatibility - nvmlProcessInfo_v1_t from system nvml.h
+// This is needed when we don't include system <nvml.h> to avoid conflicts
+#ifndef __NVML_H__
+// Only define if system nvml.h is not included
+typedef nvmlProcessInfo_t nvmlProcessInfo_v1_t;
+#endif
+
 #define FILENAME_MAX 4096
 
 typedef nvmlReturn_t (*driver_sym_t)();
