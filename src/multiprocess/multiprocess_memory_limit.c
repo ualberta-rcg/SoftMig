@@ -405,21 +405,32 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
     uint64_t usage = 0;
     const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;  // 9 MB minimum per process
     const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
-    uid_t current_uid = getuid();  // Filter by current user
+    uid_t current_uid = getuid();  // Filter by current user (fallback)
     shared_region_t* region = region_info.shared_region;
     lock_shrreg();
     for (; i < pcnt; i++) {
-        // Check if process belongs to current user
-        uid_t proc_uid = proc_get_uid(infos[i].pid);
-        if (proc_uid == (uid_t)-1) {
-            LOG_DEBUG("nvml_get_device_memory_usage: PID %u - could not read UID, skipping", infos[i].pid);
-            continue;  // Skip if we can't read UID
+        // First try to check if process belongs to current cgroup session
+        int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+        
+        if (cgroup_check == -1) {
+            // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
+            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            if (proc_uid == (uid_t)-1) {
+                LOG_DEBUG("nvml_get_device_memory_usage: PID %u - could not read UID, skipping", infos[i].pid);
+                continue;  // Skip if we can't read UID
+            }
+            if (proc_uid != current_uid) {
+                LOG_DEBUG("nvml_get_device_memory_usage: PID %u - skipping (UID %u != current UID %u)", 
+                         infos[i].pid, proc_uid, current_uid);
+                continue;  // Skip processes from other users
+            }
+        } else if (cgroup_check == 0) {
+            // Process is in a different cgroup session - skip it
+            LOG_DEBUG("nvml_get_device_memory_usage: PID %u - skipping (different cgroup session)", 
+                     infos[i].pid);
+            continue;
         }
-        if (proc_uid != current_uid) {
-            LOG_DEBUG("nvml_get_device_memory_usage: PID %u - UID %u != current UID %u, skipping", 
-                     infos[i].pid, proc_uid, current_uid);
-            continue;  // Skip processes from other users
-        }
+        // cgroup_check == 1 means process belongs to current cgroup session - include it
         
         int slot = 0;
         for (; slot < region->proc_num; slot++) {
