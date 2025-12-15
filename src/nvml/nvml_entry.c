@@ -1563,6 +1563,9 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
   unsigned int max_output = *infoCount;  // Save the output buffer size
   int is_root = (current_uid == 0);  // Root user (UID 0) sees all processes
   
+  LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Got %u processes from NVML, filtering for UID %u (root=%d)", 
+           temp_count, current_uid, is_root);
+  
   // Iterate through ALL processes and filter by cgroup session or UID (unless root)
   for (unsigned int i = 0; i < temp_count; i++) {
     if (is_root) {
@@ -1582,14 +1585,22 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
       if (cgroup_check == 1) {
         // Process belongs to current cgroup session - include it
         should_include = 1;
+        LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Including PID %u (same cgroup)", all_infos[i].pid);
       } else if (cgroup_check == -1) {
         // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
         uid_t proc_uid = proc_get_uid(all_infos[i].pid);
         if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
           should_include = 1;
+          LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Including PID %u (same UID %u, cgroup unavailable)", 
+                   all_infos[i].pid, proc_uid);
+        } else {
+          LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Excluding PID %u (UID %u != current %u)", 
+                   all_infos[i].pid, proc_uid, current_uid);
         }
+      } else {
+        // cgroup_check == 0 means different cgroup session - exclude it
+        LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Excluding PID %u (different cgroup session)", all_infos[i].pid);
       }
-      // cgroup_check == 0 means different cgroup session - exclude it
       
       if (should_include) {
         if (infos != NULL && filtered_count < max_output) {
@@ -1603,6 +1614,9 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
       }
     }
   }
+  
+  LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Filtered %u/%u processes (current UID=%u, is_root=%d)", 
+           filtered_count, temp_count, current_uid, is_root);
   
   *infoCount = filtered_count;
   

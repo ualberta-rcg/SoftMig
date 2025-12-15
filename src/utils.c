@@ -9,9 +9,12 @@
 #include <nvml.h>
 #include "include/nvml_override.h"
 #include "include/libcuda_hook.h"
+#include "include/libnvml_hook.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
 // Note: fp1 is now defined in log_file.c to avoid linking issues with standalone tools
+// Access to nvml_library_entry to bypass filtering in set_task_pid
+extern entry_t nvml_library_entry[];
 
 // Helper to get lock file path (Compute Canada optimized - uses SLURM_TMPDIR)
 static char* get_unified_lock_path(void) {
@@ -120,14 +123,12 @@ int mergepid(unsigned int *prev, unsigned int *current, nvmlProcessInfo_t1 *sub,
     for (i=0;i<*prev;i++){
         found=0;
         for (j=0;j<*current;j++) {
-            LOG_INFO("merge pid=%d",sub[i].pid);
             if (sub[i].pid == merged[j].pid) {
                 found = 1;
                 break;
             } 
         }
         if (!found) {
-            LOG_DEBUG("merged pid=%d\n",sub[i].pid);
             merged[*current].pid = sub[i].pid;
             (*current)++;
         }
@@ -138,14 +139,23 @@ int mergepid(unsigned int *prev, unsigned int *current, nvmlProcessInfo_t1 *sub,
 int getextrapid(unsigned int prev, unsigned int current, nvmlProcessInfo_t1 *pre_pids_on_device, nvmlProcessInfo_t1 *pids_on_device) {
     int i,j;
     int found = 0;
-    for (i=0; i<prev; i++){
-        LOG_INFO("prev pids[%d]=%d",i,pre_pids_on_device[i].pid);
+    LOG_INFO("getextrapid: prev=%u current=%u", prev, current);
+    if (prev > 0) {
+        LOG_INFO("Previous PIDs: ");
+        for (i=0; i<prev; i++){
+            LOG_INFO("  [%d]=%u", i, pre_pids_on_device[i].pid);
+        }
     }
-    for (i=0; i< current; i++) {
-        LOG_INFO("current pids[%d]=%d",i,pids_on_device[i].pid);
+    if (current > 0) {
+        LOG_INFO("Current PIDs: ");
+        for (i=0; i<current; i++) {
+            LOG_INFO("  [%d]=%u", i, pids_on_device[i].pid);
+        }
     }
-    if (current-prev<=0)
+    if (current-prev<=0) {
+        LOG_WARN("getextrapid: current (%u) <= prev (%u), cannot find new PID", current, prev);
         return 0;
+    }
     for (i=0; i<current; i++) {
         found = 0;
         for (j=0; j<prev; j++) {
@@ -154,9 +164,12 @@ int getextrapid(unsigned int prev, unsigned int current, nvmlProcessInfo_t1 *pre
                 break;
             }
         }
-        if (!found)
+        if (!found) {
+            LOG_INFO("getextrapid: Found new PID %u (not in previous list)", pids_on_device[i].pid);
             return pids_on_device[i].pid;
+        }
     }
+    LOG_WARN("getextrapid: All current PIDs found in previous list, no new PID detected");
     return 0;
 }
 
@@ -183,12 +196,23 @@ nvmlReturn_t set_task_pid() {
         }
         CHECK_NVML_API(nvmlDeviceGetHandleByIndex(i, &device));
         do{
-            res = nvmlDeviceGetComputeRunningProcesses(device, &previous, tmp_pids_on_device);
+            // Bypass our filtering hook - call real NVML function directly to get ALL processes
+            // This is needed for PID detection to work correctly
+            res = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                                            device, &previous, tmp_pids_on_device);
             if ((res != NVML_SUCCESS) && (res != NVML_ERROR_INSUFFICIENT_SIZE)) {
                 LOG_ERROR("Device2GetComputeRunningProcesses failed %d,%d\n",res,i);
                 return res;
             }
-        }while(res==NVML_ERROR_INSUFFICIENT_SIZE); 
+        }while(res==NVML_ERROR_INSUFFICIENT_SIZE);
+        
+        // Log raw NVML data before merging (for debugging PID=0 issues)
+        LOG_INFO("set_task_pid: BEFORE context - NVML returned %u processes on device %d", previous, i);
+        for (int k=0; k<previous && k<10; k++) {  // Log first 10 to avoid spam
+            LOG_INFO("  Raw NVML[%d]: PID=%u, memory=%llu", k, tmp_pids_on_device[k].pid, 
+                    (unsigned long long)tmp_pids_on_device[k].usedGpuMemory);
+        }
+        
         mergepid(&previous,&merged_num,(nvmlProcessInfo_t1 *)tmp_pids_on_device,pre_pids_on_device);
         break;
     }
@@ -203,44 +227,74 @@ nvmlReturn_t set_task_pid() {
         }
         CHECK_NVML_API(nvmlDeviceGetHandleByIndex (i, &device)); 
         do{
-            res = nvmlDeviceGetComputeRunningProcesses(device, &running_processes, tmp_pids_on_device);
+            // Bypass our filtering hook - call real NVML function directly to get ALL processes
+            // This is needed for PID detection to work correctly
+            res = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                                            device, &running_processes, tmp_pids_on_device);
             if ((res != NVML_SUCCESS) && (res != NVML_ERROR_INSUFFICIENT_SIZE)) {
                 LOG_ERROR("Device2GetComputeRunningProcesses failed %d\n",res);
                 return res;
             }
         }while(res == NVML_ERROR_INSUFFICIENT_SIZE);
+        
+        // Log raw NVML data after creating context (for debugging PID=0 issues)
+        LOG_INFO("set_task_pid: AFTER context - NVML returned %u processes on device %d", running_processes, i);
+        for (int k=0; k<running_processes && k<10; k++) {  // Log first 10 to avoid spam
+            LOG_INFO("  Raw NVML[%d]: PID=%u, memory=%llu", k, tmp_pids_on_device[k].pid, 
+                    (unsigned long long)tmp_pids_on_device[k].usedGpuMemory);
+        }
+        
         mergepid(&running_processes,&merged_num,(nvmlProcessInfo_t1 *)tmp_pids_on_device,pids_on_device);
         break;
     }
     running_processes = merged_num;
-    LOG_INFO("current processes num = %u %u",previous,running_processes);
-    for (i=0;i<merged_num;i++){
-        LOG_INFO("current pid in use is %d %d",i,pids_on_device[i].pid);
-        //tmp_pids_on_device[i].pid=0;
-    }
+    LOG_INFO("set_task_pid: Merged process counts - previous=%u, running=%u", previous, running_processes);
     
     // With cgroup filtering, try to find our own PID first (most reliable in SLURM/cgroup environments)
     pid_t current_pid = getpid();
     unsigned int hostpid = 0;
     
+    // Log all merged PIDs for debugging
+    if (running_processes > 0) {
+        LOG_INFO("set_task_pid: Merged process list (after filtering):");
+        for (i=0; i<running_processes && i<20; i++) {  // Log up to 20 to avoid spam
+            LOG_INFO("  Merged[%d]: PID=%u %s", i, pids_on_device[i].pid,
+                    (pids_on_device[i].pid == 0) ? "(INVALID!)" : "");
+        }
+    } else {
+        LOG_WARN("set_task_pid: No processes in merged list after filtering!");
+    }
+    
     // Check if our PID is in the filtered process list (after creating CUDA context)
+    LOG_INFO("set_task_pid: Looking for current PID %d in %u filtered processes", current_pid, running_processes);
     for (i=0; i<running_processes; i++) {
         if (pids_on_device[i].pid == (unsigned int)current_pid) {
             hostpid = current_pid;
-            LOG_INFO("Found current process PID %d in filtered GPU process list", current_pid);
+            LOG_INFO("set_task_pid: ✓ Found current process PID %d in filtered GPU process list (index %d)", current_pid, i);
             break;
+        }
+        if (pids_on_device[i].pid == 0) {
+            LOG_WARN("set_task_pid: WARNING - Found invalid PID=0 at index %d in merged list!", i);
         }
     }
     
     // If not found, fall back to the old method (difference detection)
     if (hostpid == 0) {
-        LOG_INFO("Current PID %d not found in filtered list, trying difference detection", current_pid);
+        LOG_WARN("set_task_pid: Current PID %d NOT found in filtered list (checked %u processes), trying difference detection", 
+                 current_pid, running_processes);
         hostpid = getextrapid(previous,running_processes,pre_pids_on_device,pids_on_device);
+        if (hostpid != 0) {
+            LOG_INFO("set_task_pid: Difference detection found PID %u", hostpid);
+        }
     }
     
     if (hostpid==0) {
-        LOG_ERROR("host pid is error! Current PID=%d, filtered processes=%u, previous=%u", 
+        LOG_ERROR("set_task_pid: FAILED - Current PID=%d, filtered processes=%u (previous=%u)", 
                  current_pid, running_processes, previous);
+        LOG_ERROR("set_task_pid: All PIDs in merged list:");
+        for (i=0; i<running_processes; i++) {
+            LOG_ERROR("  [%d]=%u", i, pids_on_device[i].pid);
+        }
         return NVML_ERROR_DRIVER_NOT_LOADED;
     }
     

@@ -388,7 +388,7 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     // Get current user's UID for fallback filtering
     uid_t current_uid = getuid();
     
-    LOG_INFO("sum_process_memory_from_nvml: Found %u processes on device, filtering by cgroup session or UID %u", process_count, current_uid);
+    LOG_DEBUG("sum_process_memory_from_nvml: Found %u processes on device, filtering by cgroup session or UID %u", process_count, current_uid);
     
     unsigned int included_count = 0;
     unsigned int skipped_count = 0;
@@ -411,14 +411,14 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
                 skipped_count++;
                 continue;
             } else if (proc_uid != current_uid) {
-                LOG_INFO("  Process[%u] PID=%u: skipping (UID %u != current UID %u)", 
+                LOG_DEBUG("  Process[%u] PID=%u: skipping (UID %u != current UID %u)", 
                          i, infos[i].pid, proc_uid, current_uid);
                 skipped_count++;
                 continue;
             }
         } else if (cgroup_check == 0) {
             // Process is in a different cgroup session - skip it
-            LOG_INFO("  Process[%u] PID=%u: skipping (different cgroup session)", 
+            LOG_DEBUG("  Process[%u] PID=%u: skipping (different cgroup session)", 
                      i, infos[i].pid);
             skipped_count++;
             continue;
@@ -434,14 +434,14 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
             uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
             uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
             total_usage += process_mem_counted;
-            LOG_INFO("  Process[%u] PID=%u: %llu bytes (%.2f MiB) + 5%% = %llu bytes (%.2f MiB)", 
+            LOG_DEBUG("  Process[%u] PID=%u: %llu bytes (%.2f MiB) + 5%% = %llu bytes (%.2f MiB)", 
                      i, infos[i].pid,
                      (unsigned long long)process_mem, process_mem / (1024.0 * 1024.0),
                      (unsigned long long)process_mem_counted, process_mem_counted / (1024.0 * 1024.0));
         } else {
             // Even if NVML reports 0 or unavailable, count minimum for the process
             total_usage += MIN_PROCESS_MEMORY;
-            LOG_INFO("  Process[%u] PID=%u: usedGpuMemory=%llu (unavailable/zero), counting minimum %llu bytes (%.2f MiB)", 
+            LOG_DEBUG("  Process[%u] PID=%u: usedGpuMemory=%llu (unavailable/zero), counting minimum %llu bytes (%.2f MiB)", 
                      i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory,
                      (unsigned long long)MIN_PROCESS_MEMORY, MIN_PROCESS_MEMORY / (1024.0 * 1024.0));
         }
