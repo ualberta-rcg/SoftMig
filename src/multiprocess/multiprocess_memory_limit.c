@@ -27,9 +27,10 @@
 #include "include/memory_limit.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
-// Note: We don't declare nvml_library_entry here to avoid linker errors when nvml_mod is not linked
-// Instead, we use the regular NVML function call which works in all cases
-// The hook (if present) will filter, but we filter again by cgroup/UID below anyway
+// Note: We need to bypass the hook to get ALL processes, then filter ourselves
+// This ensures we don't miss any processes due to hook filtering or buffer limits
+// Use weak symbol so it's NULL if nvml_mod not linked, allowing fallback
+extern entry_t nvml_library_entry[] __attribute__((weak));
 
 // Forward declarations for NVML functions (provided by hooks)
 const char *nvmlErrorString(nvmlReturn_t result);
@@ -271,15 +272,31 @@ int active_oom_killer() {
         }
         
         // Get all processes on this device
+        // Bypass our hook to get ALL processes (unfiltered), then filter ourselves
+        // This ensures we don't miss any processes due to hook filtering or buffer limits
         unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
-        // Use nvmlProcessInfo_t - the _v2 version expects this type
         nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
         
-        // Use regular NVML call to get processes
-        // This will go through our hook (if present) which filters by cgroup/UID
-        // We filter again below by cgroup/UID anyway, so this is safe
-        // Note: If hook is present, it may pre-filter, but we do our own filtering below
-        ret = nvmlDeviceGetComputeRunningProcesses(device, &process_count, infos);
+        if (nvml_library_entry != NULL) {
+            // Bypass hook to get ALL processes directly from NVML
+            ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                                            device, &process_count, infos);
+        } else {
+            // nvml_library_entry not available - use regular call (will go through hook)
+            ret = nvmlDeviceGetComputeRunningProcesses(device, &process_count, infos);
+        }
+        
+        // Handle buffer size issues - retry with larger buffer if needed
+        if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
+            LOG_WARN("active_oom_killer: Buffer too small, retrying with larger buffer");
+            process_count = SHARED_REGION_MAX_PROCESS_NUM;
+            if (nvml_library_entry != NULL) {
+                ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                                                device, &process_count, infos);
+            } else {
+                ret = nvmlDeviceGetComputeRunningProcesses(device, &process_count, infos);
+            }
+        }
         
         if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
             LOG_WARN("active_oom_killer: Failed to get processes for device %u: %d (%s)", 
@@ -287,7 +304,13 @@ int active_oom_killer() {
             continue;
         }
         
-        LOG_INFO("active_oom_killer: Device %u has %u processes", dev_idx, process_count);
+        LOG_INFO("active_oom_killer: Device %u has %u processes (unfiltered)", dev_idx, process_count);
+        
+        // Log all processes for debugging
+        for (unsigned int i = 0; i < process_count; i++) {
+            LOG_INFO("active_oom_killer: Process[%u]: PID=%u, memory=%llu bytes", 
+                     i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory);
+        }
         
         // Filter and kill processes belonging to current cgroup/UID
         // Only non-root users get this treatment (root is disabled above)
@@ -298,14 +321,16 @@ int active_oom_killer() {
             // Filter by cgroup session first, fall back to UID (same logic as memory counting)
             int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
             
+            LOG_DEBUG("active_oom_killer: Checking PID %u: cgroup_check=%d", infos[i].pid, cgroup_check);
+            
             if (cgroup_check == 1) {
                 // Process belongs to current cgroup session - verify UID for extra safety
                 // In SLURM, same cgroup should mean same job/user, but verify to be safe
                 uid_t proc_uid = proc_get_uid(infos[i].pid);
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                     should_kill = 1;
-                    LOG_INFO("active_oom_killer: Killing PID %u (same cgroup session, UID %u)", 
-                            infos[i].pid, proc_uid);
+                    LOG_ERROR("active_oom_killer: Will kill PID %u (same cgroup session, UID %u, memory %llu bytes)", 
+                            infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
                 } else {
                     // Same cgroup but different UID - this shouldn't happen in SLURM, but skip to be safe
                     LOG_WARN("active_oom_killer: Skipping PID %u (same cgroup but different UID %u != current UID %u)", 
@@ -317,8 +342,8 @@ int active_oom_killer() {
                 
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                     should_kill = 1;
-                    LOG_INFO("active_oom_killer: Killing PID %u (same UID %u, cgroup unavailable)", 
-                            infos[i].pid, proc_uid);
+                    LOG_ERROR("active_oom_killer: Will kill PID %u (same UID %u, cgroup unavailable, memory %llu bytes)", 
+                            infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
                 } else {
                     LOG_DEBUG("active_oom_killer: Skipping PID %u (UID %u != current UID %u)", 
                              infos[i].pid, proc_uid, current_uid);
