@@ -14,17 +14,28 @@
 
 #include <assert.h>
 #include <cuda.h>
+// Prevent system <nvml.h> from being included - we use nvml-subset.h instead
+// This macro tells nvml.h (if included) to skip some definitions
+#define NVML_NO_UNVERSIONED_FUNC_DEFS
+// Include nvml-subset.h FIRST - it defines structures we need
+#include "include/nvml-subset.h"
 #include "include/nvml_prefix.h"
-#include <nvml.h>
+#include "include/libnvml_hook.h"
+#include "include/nvml_override.h"
 
 #include "include/process_utils.h"
 #include "include/memory_limit.h"
 #include "multiprocess/multiprocess_memory_limit.h"
-#include "include/libnvml_hook.h"
-#include "include/nvml_override.h"
 
 // External declaration for NVML library entry table
 extern entry_t nvml_library_entry[];
+
+// Forward declarations for NVML functions (provided by hooks)
+const char *nvmlErrorString(nvmlReturn_t result);
+nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount);
+nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device);
+nvmlReturn_t nvmlDeviceGetUUID(nvmlDevice_t device, char *uuid, unsigned int length);
+nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos);
 
 
 #ifndef SEM_WAIT_TIME
@@ -253,8 +264,8 @@ int active_oom_killer() {
         
         // Get all processes on this device
         unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
-        // Use nvmlProcessInfo_v1_t to match system nvml.h (since we're calling real NVML function)
-        nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+        // Use nvmlProcessInfo_t - the _v2 version expects this type
+        nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
         
         // Bypass our hook to get ALL processes (not filtered)
         // Use the real NVML function directly to get unfiltered process list
@@ -460,7 +471,7 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     }
     
     unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
-    nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
     ret = nvmlDeviceGetComputeRunningProcesses(ndev, &process_count, infos);
     
     if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
@@ -530,7 +541,7 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
         LOG_ERROR("NVML get device %d error, %s", dev, nvmlErrorString(ret));
     }
     unsigned int pcnt = SHARED_REGION_MAX_PROCESS_NUM;
-    nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
     ret = nvmlDeviceGetComputeRunningProcesses(ndev, &pcnt, infos);
     if (ret != NVML_SUCCESS) {
         LOG_ERROR("NVML get process error, %s", nvmlErrorString(ret));
