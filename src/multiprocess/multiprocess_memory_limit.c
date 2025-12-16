@@ -20,6 +20,11 @@
 #include "include/process_utils.h"
 #include "include/memory_limit.h"
 #include "multiprocess/multiprocess_memory_limit.h"
+#include "include/libnvml_hook.h"
+#include "include/nvml_override.h"
+
+// External declaration for NVML library entry table
+extern entry_t nvml_library_entry[];
 
 
 #ifndef SEM_WAIT_TIME
@@ -185,11 +190,139 @@ int active_oom_killer() {
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return 0;  // No-op when softmig is disabled
     }
-    int i;
-    for (i=0;i<region_info.shared_region->proc_num;i++) {
-        kill(region_info.shared_region->procs[i].pid,9);
+    
+    // Get current user's UID for fallback filtering
+    uid_t current_uid = getuid();
+    int is_root = (current_uid == 0);
+    
+    // Root user is disabled from OOM killing - only non-root users get this treatment
+    if (is_root) {
+        LOG_INFO("active_oom_killer: Root user (UID 0) - OOM killer disabled, no processes killed");
+        return 0;
     }
-    return 0;
+    
+    LOG_ERROR("active_oom_killer: OOM detected - killing processes from current cgroup/UID %u", current_uid);
+    
+    // Query NVML for all processes on all devices (same approach as memory counting)
+    unsigned int nvml_devices_count;
+    nvmlReturn_t ret = nvmlDeviceGetCount_v2(&nvml_devices_count);
+    if (ret != NVML_SUCCESS) {
+        LOG_ERROR("active_oom_killer: Failed to get device count: %d (%s)", ret, nvmlErrorString(ret));
+        // Fallback: kill processes in shared region, but still verify they belong to current cgroup/UID
+        int i;
+        int fallback_killed = 0;
+        for (i=0;i<region_info.shared_region->proc_num;i++) {
+            int32_t pid = region_info.shared_region->procs[i].pid;
+            
+            // Verify process belongs to current cgroup/UID before killing (same filtering as main path)
+            int should_kill = 0;
+            int cgroup_check = proc_belongs_to_current_cgroup_session(pid);
+            
+            if (cgroup_check == 1) {
+                should_kill = 1;
+            } else if (cgroup_check == -1) {
+                uid_t proc_uid = proc_get_uid(pid);
+                if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+                    should_kill = 1;
+                }
+            }
+            
+            if (should_kill && proc_alive(pid) == PROC_STATE_ALIVE) {
+                LOG_WARN("active_oom_killer: Fallback - killing PID %d from shared region (NVML query failed, verified cgroup/UID)", pid);
+                kill(pid, SIGKILL);
+                fallback_killed++;
+            } else {
+                LOG_DEBUG("active_oom_killer: Fallback - skipping PID %d (not in current cgroup/UID or already dead)", pid);
+            }
+        }
+        LOG_ERROR("active_oom_killer: Fallback killed %d processes from shared region", fallback_killed);
+        return fallback_killed;
+    }
+    
+    int total_killed = 0;
+    
+    // Iterate through all devices
+    for (unsigned int dev_idx = 0; dev_idx < nvml_devices_count; dev_idx++) {
+        nvmlDevice_t device;
+        ret = nvmlDeviceGetHandleByIndex(dev_idx, &device);
+        if (ret != NVML_SUCCESS) {
+            LOG_WARN("active_oom_killer: Failed to get device handle for device %u: %d (%s)", 
+                     dev_idx, ret, nvmlErrorString(ret));
+            continue;
+        }
+        
+        // Get all processes on this device
+        unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
+        nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+        
+        // Bypass our hook to get ALL processes (not filtered)
+        // Use the real NVML function directly to get unfiltered process list
+        ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                                        device, &process_count, infos);
+        
+        if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+            LOG_WARN("active_oom_killer: Failed to get processes for device %u: %d (%s)", 
+                     dev_idx, ret, nvmlErrorString(ret));
+            continue;
+        }
+        
+        LOG_INFO("active_oom_killer: Device %u has %u processes", dev_idx, process_count);
+        
+        // Filter and kill processes belonging to current cgroup/UID
+        // Only non-root users get this treatment (root is disabled above)
+        for (unsigned int i = 0; i < process_count; i++) {
+            int should_kill = 0;
+            
+            // Filter by cgroup session first, fall back to UID (same logic as memory counting)
+            int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+            
+            if (cgroup_check == 1) {
+                // Process belongs to current cgroup session - kill it
+                should_kill = 1;
+                LOG_INFO("active_oom_killer: Killing PID %u (same cgroup session)", infos[i].pid);
+            } else if (cgroup_check == -1) {
+                // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
+                uid_t proc_uid = proc_get_uid(infos[i].pid);
+                
+                if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+                    should_kill = 1;
+                    LOG_INFO("active_oom_killer: Killing PID %u (same UID %u, cgroup unavailable)", 
+                            infos[i].pid, proc_uid);
+                } else {
+                    LOG_DEBUG("active_oom_killer: Skipping PID %u (UID %u != current UID %u)", 
+                             infos[i].pid, proc_uid, current_uid);
+                }
+            } else {
+                // cgroup_check == 0 means different cgroup session - skip it
+                LOG_DEBUG("active_oom_killer: Skipping PID %u (different cgroup session)", infos[i].pid);
+            }
+            
+            if (should_kill) {
+                // Verify process is still alive before killing
+                if (proc_alive(infos[i].pid) == PROC_STATE_ALIVE) {
+                    LOG_ERROR("active_oom_killer: Killing PID %u (device %u, memory %llu bytes)", 
+                             infos[i].pid, dev_idx, (unsigned long long)infos[i].usedGpuMemory);
+                    int kill_result = kill(infos[i].pid, SIGKILL);
+                    if (kill_result == 0) {
+                        total_killed++;
+                    } else {
+                        LOG_WARN("active_oom_killer: Failed to kill PID %u: errno=%d", infos[i].pid, errno);
+                    }
+                } else {
+                    LOG_DEBUG("active_oom_killer: PID %u is already dead, skipping", infos[i].pid);
+                }
+            }
+        }
+    }
+    
+    LOG_ERROR("active_oom_killer: Killed %d processes from current cgroup/UID", total_killed);
+    
+    // Give processes a moment to terminate
+    if (total_killed > 0) {
+        usleep(200000);  // 200ms
+    }
+    
+    return total_killed;
 }
 
 void pre_launch_kernel() {

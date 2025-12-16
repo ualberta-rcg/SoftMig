@@ -43,6 +43,13 @@ size_t round_up(size_t size, size_t unit) {
 // Internal function that doesn't lock (caller must hold lock_shrreg)
 // Uses summed NVML usage (with 9MB min + 5% overhead) to check against limit
 int oom_check_nolock(const int dev, size_t addon) {
+    // Root user is disabled from OOM checking - only non-root users get this treatment
+    uid_t current_uid = getuid();
+    if (current_uid == 0) {
+        LOG_DEBUG("oom_check_nolock: Root user (UID 0) - OOM checking disabled");
+        return 0;  // Always allow allocation for root
+    }
+    
     int count1=0;
     CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetCount,&count1);
     CUdevice d;
@@ -88,16 +95,15 @@ int oom_check_nolock(const int dev, size_t addon) {
             }
         }
         
-        // If still OOM and OOM killer is enabled, kill the current process
+        // If still OOM and OOM killer is enabled, kill processes from current cgroup/UID
         if (enable_active_oom_killer) {
-            pid_t current_pid = getpid();
-            LOG_ERROR("OOM detected and ACTIVE_OOM_KILLER enabled - killing process %d (tried to allocate %lu bytes, would exceed limit %llu, current usage %llu)", 
-                     current_pid, addon, (unsigned long long)limit, (unsigned long long)_usage);
-            // Send SIGKILL to current process
-            kill(current_pid, SIGKILL);
-            // If kill() returns, something went wrong, but we'll still return error
-            // Give it a moment to terminate
-            usleep(100000);  // 100ms
+            LOG_ERROR("OOM detected and ACTIVE_OOM_KILLER enabled - killing processes from current cgroup/UID (tried to allocate %lu bytes, would exceed limit %llu, current usage %llu)", 
+                     addon, (unsigned long long)limit, (unsigned long long)_usage);
+            // Call active_oom_killer which queries NVML and filters by cgroup/UID
+            // This will kill all processes from the current user/cgroup, not just self
+            active_oom_killer();
+            // After killing, we still return error (allocation failed)
+            // The killed processes will free up memory for future allocations
         }
         
         return 1;
