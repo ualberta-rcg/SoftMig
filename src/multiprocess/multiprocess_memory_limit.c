@@ -231,7 +231,14 @@ int active_oom_killer() {
             int cgroup_check = proc_belongs_to_current_cgroup_session(pid);
             
             if (cgroup_check == 1) {
-                should_kill = 1;
+                // Same cgroup - verify UID for extra safety
+                uid_t proc_uid = proc_get_uid(pid);
+                if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+                    should_kill = 1;
+                } else {
+                    LOG_DEBUG("active_oom_killer: Fallback - skipping PID %d (same cgroup but different UID %u != current UID %u)", 
+                             pid, proc_uid, current_uid);
+                }
             } else if (cgroup_check == -1) {
                 uid_t proc_uid = proc_get_uid(pid);
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
@@ -284,6 +291,7 @@ int active_oom_killer() {
         
         // Filter and kill processes belonging to current cgroup/UID
         // Only non-root users get this treatment (root is disabled above)
+        // In multi-user SLURM environment: filter by cgroup first (job isolation), then UID (user isolation)
         for (unsigned int i = 0; i < process_count; i++) {
             int should_kill = 0;
             
@@ -291,9 +299,18 @@ int active_oom_killer() {
             int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
             
             if (cgroup_check == 1) {
-                // Process belongs to current cgroup session - kill it
-                should_kill = 1;
-                LOG_INFO("active_oom_killer: Killing PID %u (same cgroup session)", infos[i].pid);
+                // Process belongs to current cgroup session - verify UID for extra safety
+                // In SLURM, same cgroup should mean same job/user, but verify to be safe
+                uid_t proc_uid = proc_get_uid(infos[i].pid);
+                if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+                    should_kill = 1;
+                    LOG_INFO("active_oom_killer: Killing PID %u (same cgroup session, UID %u)", 
+                            infos[i].pid, proc_uid);
+                } else {
+                    // Same cgroup but different UID - this shouldn't happen in SLURM, but skip to be safe
+                    LOG_WARN("active_oom_killer: Skipping PID %u (same cgroup but different UID %u != current UID %u)", 
+                             infos[i].pid, proc_uid, current_uid);
+                }
             } else if (cgroup_check == -1) {
                 // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
                 uid_t proc_uid = proc_get_uid(infos[i].pid);
