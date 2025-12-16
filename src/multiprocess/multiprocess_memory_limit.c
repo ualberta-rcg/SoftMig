@@ -432,16 +432,27 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
         }
         // cgroup_check == 1 means process belongs to current cgroup session - include it
         
+        // Count memory for ALL processes in the cgroup/UID, regardless of whether
+        // they're registered in the shared region. The shared region is for tracking,
+        // not for determining what counts toward the limit. This ensures the OOM killer
+        // works correctly even if processes haven't registered yet.
+        uint64_t process_mem = infos[i].usedGpuMemory;
+        // Add 5% overhead, then ensure minimum
+        uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
+        uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
+        usage += process_mem_counted;
+        
+        // Optional: Log if process is not in shared region (for debugging)
         int slot = 0;
+        int found_in_region = 0;
         for (; slot < region->proc_num; slot++) {
-            if (infos[i].pid != region->procs[slot].pid)
-                continue;
-            uint64_t process_mem = infos[i].usedGpuMemory;
-            // Add 5% overhead, then ensure minimum
-            uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
-            uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
-            usage += process_mem_counted;
-            break;  // Found matching PID, no need to continue searching
+            if (infos[i].pid == region->procs[slot].pid) {
+                found_in_region = 1;
+                break;
+            }
+        }
+        if (!found_in_region) {
+            LOG_DEBUG("nvml_get_device_memory_usage: PID %u counted but not yet registered in shared region", infos[i].pid);
         }
     }
     unlock_shrreg();
