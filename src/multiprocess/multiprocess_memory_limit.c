@@ -27,8 +27,9 @@
 #include "include/memory_limit.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
-// External declaration for NVML library entry table
-extern entry_t nvml_library_entry[];
+// Note: We don't declare nvml_library_entry here to avoid linker errors when nvml_mod is not linked
+// Instead, we use the regular NVML function call which works in all cases
+// The hook (if present) will filter, but we filter again by cgroup/UID below anyway
 
 // Forward declarations for NVML functions (provided by hooks)
 const char *nvmlErrorString(nvmlReturn_t result);
@@ -267,10 +268,11 @@ int active_oom_killer() {
         // Use nvmlProcessInfo_t - the _v2 version expects this type
         nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
         
-        // Bypass our hook to get ALL processes (not filtered)
-        // Use the real NVML function directly to get unfiltered process list
-        ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
-                                        device, &process_count, infos);
+        // Use regular NVML call to get processes
+        // This will go through our hook (if present) which filters by cgroup/UID
+        // We filter again below by cgroup/UID anyway, so this is safe
+        // Note: If hook is present, it may pre-filter, but we do our own filtering below
+        ret = nvmlDeviceGetComputeRunningProcesses(device, &process_count, infos);
         
         if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
             LOG_WARN("active_oom_killer: Failed to get processes for device %u: %d (%s)", 
