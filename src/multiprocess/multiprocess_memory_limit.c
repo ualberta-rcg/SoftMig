@@ -253,7 +253,8 @@ int active_oom_killer() {
         
         // Get all processes on this device
         unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
-        nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+        // Use nvmlProcessInfo_v1_t to match system nvml.h (since we're calling real NVML function)
+        nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
         
         // Bypass our hook to get ALL processes (not filtered)
         // Use the real NVML function directly to get unfiltered process list
