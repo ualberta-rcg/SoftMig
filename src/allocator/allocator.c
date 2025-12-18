@@ -65,17 +65,21 @@ int oom_check_nolock(const int dev, size_t addon) {
 
     // Use summed NVML usage (with 9MB min + 5% overhead) - this is the actual current usage
     // This ensures we check against the real summed values, not tracked usage
+    LOG_INFO("oom_check_nolock: Starting OOM check for device %d - current PID %d, current UID %u, limit=%llu, addon=%lu", 
+             d, getpid(), getuid(), (unsigned long long)limit, addon);
+    
     uint64_t _usage = get_summed_device_memory_usage_from_nvml(d);
     
     // If summed usage query failed, fall back to tracked usage
     if (_usage == 0) {
-        LOG_DEBUG("oom_check_nolock: get_summed_device_memory_usage_from_nvml returned 0, falling back to tracked usage");
+        LOG_WARN("oom_check_nolock: get_summed_device_memory_usage_from_nvml returned 0, falling back to tracked usage");
         _usage = get_gpu_memory_usage_nolock(d);
+        LOG_INFO("oom_check_nolock: Fallback tracked usage=%llu", (unsigned long long)_usage);
     }
 
     uint64_t new_allocated = _usage + addon;
-    LOG_INFO("oom_check_nolock: _usage=%llu limit=%llu addon=%lu new_allocated=%llu", 
-             (unsigned long long)_usage, (unsigned long long)limit, addon, (unsigned long long)new_allocated);
+    LOG_INFO("oom_check_nolock: Device %d - _usage=%llu limit=%llu addon=%lu new_allocated=%llu (current PID %d, current UID %u)", 
+             d, (unsigned long long)_usage, (unsigned long long)limit, addon, (unsigned long long)new_allocated, getpid(), getuid());
     
     if (new_allocated > limit) {
         LOG_ERROR("Device %d OOM %llu / %llu (trying to allocate %lu bytes)", d, (unsigned long long)new_allocated, (unsigned long long)limit, addon);

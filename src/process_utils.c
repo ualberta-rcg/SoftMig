@@ -1,5 +1,7 @@
 #include "include/process_utils.h"
+#include "include/log_utils.h"
 #include <stdlib.h>
+#include <errno.h>
 
 // Get the UID of a process by PID (returns -1 on error)
 uid_t proc_get_uid(int32_t pid) {
@@ -8,23 +10,33 @@ uid_t proc_get_uid(int32_t pid) {
     
     FILE* fp;
     if ((fp = fopen(filename, "r")) == NULL) {
+        LOG_WARN("proc_get_uid: PID %d - failed to open /proc/%d/status, errno=%d", pid, pid, errno);
         return (uid_t)-1;
     }
     
     char line[BUFFER_LENGTH];
     uid_t uid = (uid_t)-1;
+    unsigned int real_uid = 0, effective_uid = 0, saved_uid = 0, filesystem_uid = 0;
     
     while (fgets(line, sizeof(line), fp) != NULL) {
         if (strncmp(line, "Uid:", 4) == 0) {
             // Format: "Uid:    1000    1000    1000    1000"
             // First value is real UID
-            if (sscanf(line, "Uid: %u", (unsigned int*)&uid) == 1) {
+            if (sscanf(line, "Uid: %u %u %u %u", &real_uid, &effective_uid, &saved_uid, &filesystem_uid) >= 1) {
+                uid = (uid_t)real_uid;
+                LOG_DEBUG("proc_get_uid: PID %d - UID read: real=%u effective=%u saved=%u fs=%u", 
+                         pid, real_uid, effective_uid, saved_uid, filesystem_uid);
                 break;
+            } else {
+                LOG_WARN("proc_get_uid: PID %d - failed to parse Uid line: %s", pid, line);
             }
         }
     }
     
     fclose(fp);
+    if (uid == (uid_t)-1) {
+        LOG_WARN("proc_get_uid: PID %d - UID not found in /proc/%d/status", pid, pid);
+    }
     return uid;
 }
 
@@ -179,10 +191,15 @@ static char* extract_job_id_from_path(const char* cgroup_path) {
 // Returns 1 if process belongs to same session, 0 if not, -1 on error
 // Falls back to -1 if cgroups cannot be determined (should use UID filtering)
 int proc_belongs_to_current_cgroup_session(int32_t pid) {
+    pid_t current_pid = getpid();
+    uid_t current_uid = getuid();
+    
     // Get current process's cgroup path
-    char* current_cgroup = proc_get_cgroup_path(getpid());
+    char* current_cgroup = proc_get_cgroup_path(current_pid);
     if (current_cgroup == NULL) {
         // Cannot determine current cgroup - fall back to UID check
+        LOG_DEBUG("proc_belongs_to_current_cgroup_session: Current PID %d (UID %u) - cannot determine cgroup, returning -1 (fallback to UID)", 
+                 current_pid, current_uid);
         return -1;
     }
     
@@ -191,6 +208,7 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
     if (proc_cgroup == NULL) {
         free(current_cgroup);
         // Cannot determine process cgroup - fall back to UID check
+        LOG_DEBUG("proc_belongs_to_current_cgroup_session: Target PID %d - cannot determine cgroup, returning -1 (fallback to UID)", pid);
         return -1;
     }
     
@@ -200,17 +218,33 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
     
     int result = -1;
     
+    LOG_INFO("proc_belongs_to_current_cgroup_session: Checking PID %d (current PID %d, current UID %u) - current_cgroup='%s' proc_cgroup='%s' current_job_id=%s proc_job_id=%s", 
+             pid, current_pid, current_uid, 
+             current_cgroup ? current_cgroup : "NULL",
+             proc_cgroup ? proc_cgroup : "NULL",
+             current_job_id ? current_job_id : "NULL",
+             proc_job_id ? proc_job_id : "NULL");
+    
     if (current_job_id != NULL && proc_job_id != NULL) {
         // Both have job IDs - compare them
-        result = (strcmp(current_job_id, proc_job_id) == 0) ? 1 : 0;
+        int job_match = (strcmp(current_job_id, proc_job_id) == 0);
+        result = job_match ? 1 : 0;
+        LOG_INFO("proc_belongs_to_current_cgroup_session: PID %d - job ID comparison: current='%s' proc='%s' match=%d result=%d", 
+                 pid, current_job_id, proc_job_id, job_match, result);
     } else if (current_job_id == NULL && proc_job_id == NULL) {
         // Neither has a job ID - compare full cgroup paths
         // Check if they share the same parent path (up to the job level)
         // For now, do a simple string comparison of the paths
         // This will match if they're in the same cgroup hierarchy
-        result = (strcmp(current_cgroup, proc_cgroup) == 0) ? 1 : 0;
+        int path_match = (strcmp(current_cgroup, proc_cgroup) == 0);
+        result = path_match ? 1 : 0;
+        LOG_INFO("proc_belongs_to_current_cgroup_session: PID %d - path comparison (no job IDs): match=%d result=%d", 
+                 pid, path_match, result);
+    } else {
+        // If one has a job ID and the other doesn't, they're different (result stays -1)
+        LOG_INFO("proc_belongs_to_current_cgroup_session: PID %d - one has job ID, other doesn't: current_job_id=%s proc_job_id=%s, result=-1", 
+                 pid, current_job_id ? current_job_id : "NULL", proc_job_id ? proc_job_id : "NULL");
     }
-    // If one has a job ID and the other doesn't, they're different (result stays -1)
     
     free(current_cgroup);
     free(proc_cgroup);

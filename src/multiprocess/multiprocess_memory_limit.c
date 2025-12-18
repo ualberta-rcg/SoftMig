@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <stddef.h>
 #include <semaphore.h>
@@ -318,55 +319,80 @@ int active_oom_killer() {
         for (unsigned int i = 0; i < process_count; i++) {
             int should_kill = 0;
             
+            // Log all process information from NVML
+            LOG_INFO("active_oom_killer: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx)", 
+                     i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory, 
+                     (unsigned long long)infos[i].usedGpuMemory);
+            
             // Filter by cgroup session first, fall back to UID (same logic as memory counting)
             int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
             
-            LOG_DEBUG("active_oom_killer: Checking PID %u: cgroup_check=%d", infos[i].pid, cgroup_check);
+            LOG_INFO("active_oom_killer: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
+                     i, infos[i].pid, cgroup_check);
             
             if (cgroup_check == 1) {
                 // Process belongs to current cgroup session - verify UID for extra safety
                 // In SLURM, same cgroup should mean same job/user, but verify to be safe
                 uid_t proc_uid = proc_get_uid(infos[i].pid);
+                
+                LOG_INFO("active_oom_killer: Process[%u] PID %u - same cgroup, checking UID: proc_uid=%u current_uid=%u", 
+                         i, infos[i].pid, proc_uid, current_uid);
+                
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                     should_kill = 1;
-                    LOG_ERROR("active_oom_killer: Will kill PID %u (same cgroup session, UID %u, memory %llu bytes)", 
-                            infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
+                    LOG_ERROR("active_oom_killer: Process[%u] PID %u - WILL KILL (same cgroup session, UID %u matches, memory %llu bytes)", 
+                            i, infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
                 } else {
                     // Same cgroup but different UID - this shouldn't happen in SLURM, but skip to be safe
-                    LOG_WARN("active_oom_killer: Skipping PID %u (same cgroup but different UID %u != current UID %u)", 
-                             infos[i].pid, proc_uid, current_uid);
+                    LOG_WARN("active_oom_killer: Process[%u] PID %u - SKIPPING (same cgroup but different UID %u != current UID %u, memory %llu bytes)", 
+                             i, infos[i].pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
                 }
             } else if (cgroup_check == -1) {
                 // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
                 uid_t proc_uid = proc_get_uid(infos[i].pid);
                 
+                LOG_INFO("active_oom_killer: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
+                         i, infos[i].pid, proc_uid, current_uid);
+                
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                     should_kill = 1;
-                    LOG_ERROR("active_oom_killer: Will kill PID %u (same UID %u, cgroup unavailable, memory %llu bytes)", 
-                            infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
+                    LOG_ERROR("active_oom_killer: Process[%u] PID %u - WILL KILL (same UID %u, cgroup unavailable, memory %llu bytes)", 
+                            i, infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
                 } else {
-                    LOG_DEBUG("active_oom_killer: Skipping PID %u (UID %u != current UID %u)", 
-                             infos[i].pid, proc_uid, current_uid);
+                    LOG_INFO("active_oom_killer: Process[%u] PID %u - SKIPPING (UID %u != current UID %u, memory %llu bytes)", 
+                             i, infos[i].pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
                 }
             } else {
                 // cgroup_check == 0 means different cgroup session - skip it
-                LOG_DEBUG("active_oom_killer: Skipping PID %u (different cgroup session)", infos[i].pid);
+                uid_t proc_uid = proc_get_uid(infos[i].pid);
+                LOG_INFO("active_oom_killer: Process[%u] PID %u - SKIPPING (different cgroup session, proc_uid=%u current_uid=%u, memory %llu bytes)", 
+                         i, infos[i].pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
             }
             
             if (should_kill) {
                 // Verify process is still alive before killing
-                if (proc_alive(infos[i].pid) == PROC_STATE_ALIVE) {
-                    LOG_ERROR("active_oom_killer: Killing PID %u (device %u, memory %llu bytes)", 
-                             infos[i].pid, dev_idx, (unsigned long long)infos[i].usedGpuMemory);
+                int proc_state = proc_alive(infos[i].pid);
+                LOG_INFO("active_oom_killer: Process[%u] PID %u - should_kill=1, proc_alive check: state=%d (0=alive, 1=dead, 2=unknown)", 
+                         i, infos[i].pid, proc_state);
+                
+                if (proc_state == PROC_STATE_ALIVE) {
+                    LOG_ERROR("active_oom_killer: Process[%u] PID %u - KILLING (device %u, memory %llu bytes)", 
+                             i, infos[i].pid, dev_idx, (unsigned long long)infos[i].usedGpuMemory);
                     int kill_result = kill(infos[i].pid, SIGKILL);
                     if (kill_result == 0) {
                         total_killed++;
+                        LOG_ERROR("active_oom_killer: Process[%u] PID %u - KILLED successfully (total_killed=%d)", 
+                                 i, infos[i].pid, total_killed);
                     } else {
-                        LOG_WARN("active_oom_killer: Failed to kill PID %u: errno=%d", infos[i].pid, errno);
+                        LOG_WARN("active_oom_killer: Process[%u] PID %u - FAILED to kill: errno=%d (%s)", 
+                                i, infos[i].pid, errno, strerror(errno));
                     }
                 } else {
-                    LOG_DEBUG("active_oom_killer: PID %u is already dead, skipping", infos[i].pid);
+                    LOG_INFO("active_oom_killer: Process[%u] PID %u - already dead (state=%d), skipping kill", 
+                             i, infos[i].pid, proc_state);
                 }
+            } else {
+                LOG_INFO("active_oom_killer: Process[%u] PID %u - should_kill=0, NOT killing", i, infos[i].pid);
             }
         }
     }
@@ -531,33 +557,58 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     
     // Get current user's UID for fallback filtering
     uid_t current_uid = getuid();
+    pid_t current_pid = getpid();
+    
+    LOG_INFO("get_summed_device_memory_usage_from_nvml: Starting memory calculation for CUDA device %d (NVML device %u) - current PID %d, current UID %u, found %u processes", 
+             cuda_dev, nvml_dev_idx, current_pid, current_uid, process_count);
     
     // Sum up memory from all processes belonging to current SLURM job (or current user if not in SLURM)
     for (unsigned int i = 0; i < process_count; i++) {
+        // Log all process information from NVML
+        LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx), NVML_VALUE_NOT_AVAILABLE=%llu", 
+                 i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory, 
+                 (unsigned long long)infos[i].usedGpuMemory,
+                 (unsigned long long)NVML_VALUE_NOT_AVAILABLE_ULL);
+        
         // First try to check if process belongs to current cgroup session
         int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+        
+        LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
+                 i, infos[i].pid, cgroup_check);
         
         if (cgroup_check == -1) {
             // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
             uid_t proc_uid = proc_get_uid(infos[i].pid);
             
+            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
+                     i, infos[i].pid, proc_uid, current_uid);
+            
             if (proc_uid == (uid_t)-1) {
                 // Couldn't read UID - skip this process to avoid blocking on shared region lock
                 // We don't want to block nvidia-smi or other tools if another process is holding the lock
                 // If the process belongs to us, it will be counted when we can read its UID
-                LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - could not read UID, skipping (avoiding lock contention)", 
-                         infos[i].pid);
+                LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - could not read UID, skipping (avoiding lock contention)", 
+                         i, infos[i].pid);
                 continue;
             } else if (proc_uid != current_uid) {
-                LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - skipping (UID %u != current UID %u)", 
-                         infos[i].pid, proc_uid, current_uid);
+                LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - skipping (UID %u != current UID %u)", 
+                         i, infos[i].pid, proc_uid, current_uid);
                 continue;
+            } else {
+                LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - UID match, including in usage calculation", 
+                         i, infos[i].pid);
             }
         } else if (cgroup_check == 0) {
             // Process is in a different cgroup session - skip it
-            LOG_DEBUG("get_summed_device_memory_usage_from_nvml: PID %u - skipping (different cgroup session)", 
-                     infos[i].pid);
+            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - skipping (different cgroup session, proc_uid=%u current_uid=%u)", 
+                     i, infos[i].pid, proc_uid, current_uid);
             continue;
+        } else {
+            // cgroup_check == 1 means process belongs to current cgroup session
+            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - same cgroup session, including (proc_uid=%u current_uid=%u)", 
+                     i, infos[i].pid, proc_uid, current_uid);
         }
         // cgroup_check == 1 means process belongs to current cgroup session - include it
         
@@ -568,11 +619,23 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
             uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
             uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
             total_usage += process_mem_counted;
+            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - counted: raw=%llu overhead=%llu final=%llu (min=%llu), total_usage now=%llu", 
+                     i, infos[i].pid, 
+                     (unsigned long long)process_mem,
+                     (unsigned long long)process_mem_with_overhead,
+                     (unsigned long long)process_mem_counted,
+                     (unsigned long long)MIN_PROCESS_MEMORY,
+                     (unsigned long long)total_usage);
         } else {
             // Even if NVML reports 0 or unavailable, count minimum for the process
             total_usage += MIN_PROCESS_MEMORY;
+            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - memory unavailable/zero, counting minimum %llu, total_usage now=%llu", 
+                     i, infos[i].pid, (unsigned long long)MIN_PROCESS_MEMORY, (unsigned long long)total_usage);
         }
     }
+    
+    LOG_INFO("get_summed_device_memory_usage_from_nvml: Final total_usage=%llu bytes for CUDA device %d", 
+             (unsigned long long)total_usage, cuda_dev);
     
     return total_usage;
 }
@@ -595,29 +658,55 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
     const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;  // 9 MB minimum per process
     const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
     uid_t current_uid = getuid();  // Filter by current user (fallback)
+    pid_t current_pid = getpid();
     shared_region_t* region = region_info.shared_region;
+    
+    LOG_INFO("nvml_get_device_memory_usage: Starting memory calculation for device %d - current PID %d, current UID %u, found %u processes", 
+             dev, current_pid, current_uid, pcnt);
+    
     lock_shrreg();
     for (; i < pcnt; i++) {
+        // Log all process information from NVML
+        LOG_INFO("nvml_get_device_memory_usage: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx)", 
+                 i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory, 
+                 (unsigned long long)infos[i].usedGpuMemory);
+        
         // First try to check if process belongs to current cgroup session
         int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+        
+        LOG_INFO("nvml_get_device_memory_usage: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
+                 i, infos[i].pid, cgroup_check);
         
         if (cgroup_check == -1) {
             // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
             uid_t proc_uid = proc_get_uid(infos[i].pid);
+            
+            LOG_INFO("nvml_get_device_memory_usage: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
+                     i, infos[i].pid, proc_uid, current_uid);
+            
             if (proc_uid == (uid_t)-1) {
-                LOG_DEBUG("nvml_get_device_memory_usage: PID %u - could not read UID, skipping", infos[i].pid);
+                LOG_WARN("nvml_get_device_memory_usage: Process[%u] PID %u - could not read UID, skipping", i, infos[i].pid);
                 continue;  // Skip if we can't read UID
             }
             if (proc_uid != current_uid) {
-                LOG_DEBUG("nvml_get_device_memory_usage: PID %u - skipping (UID %u != current UID %u)", 
-                         infos[i].pid, proc_uid, current_uid);
+                LOG_INFO("nvml_get_device_memory_usage: Process[%u] PID %u - skipping (UID %u != current UID %u)", 
+                         i, infos[i].pid, proc_uid, current_uid);
                 continue;  // Skip processes from other users
+            } else {
+                LOG_INFO("nvml_get_device_memory_usage: Process[%u] PID %u - UID match, including in usage calculation", 
+                         i, infos[i].pid);
             }
         } else if (cgroup_check == 0) {
             // Process is in a different cgroup session - skip it
-            LOG_DEBUG("nvml_get_device_memory_usage: PID %u - skipping (different cgroup session)", 
-                     infos[i].pid);
+            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            LOG_INFO("nvml_get_device_memory_usage: Process[%u] PID %u - skipping (different cgroup session, proc_uid=%u current_uid=%u)", 
+                     i, infos[i].pid, proc_uid, current_uid);
             continue;
+        } else {
+            // cgroup_check == 1 means process belongs to current cgroup session
+            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            LOG_INFO("nvml_get_device_memory_usage: Process[%u] PID %u - same cgroup session, including (proc_uid=%u current_uid=%u)", 
+                     i, infos[i].pid, proc_uid, current_uid);
         }
         // cgroup_check == 1 means process belongs to current cgroup session - include it
         
@@ -631,6 +720,14 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
         uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
         usage += process_mem_counted;
         
+        LOG_INFO("nvml_get_device_memory_usage: Process[%u] PID %u - counted: raw=%llu overhead=%llu final=%llu (min=%llu), usage now=%llu", 
+                 i, infos[i].pid, 
+                 (unsigned long long)process_mem,
+                 (unsigned long long)process_mem_with_overhead,
+                 (unsigned long long)process_mem_counted,
+                 (unsigned long long)MIN_PROCESS_MEMORY,
+                 (unsigned long long)usage);
+        
         // Optional: Log if process is not in shared region (for debugging)
         int slot = 0;
         int found_in_region = 0;
@@ -641,7 +738,11 @@ uint64_t nvml_get_device_memory_usage(const int dev) {
             }
         }
         if (!found_in_region) {
-            LOG_DEBUG("nvml_get_device_memory_usage: PID %u counted but not yet registered in shared region", infos[i].pid);
+            LOG_INFO("nvml_get_device_memory_usage: Process[%u] PID %u - counted but not yet registered in shared region (proc_num=%d)", 
+                     i, infos[i].pid, region->proc_num);
+        } else {
+            LOG_DEBUG("nvml_get_device_memory_usage: Process[%u] PID %u - found in shared region at slot %d", 
+                     i, infos[i].pid, slot);
         }
     }
     unlock_shrreg();
