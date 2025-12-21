@@ -1623,15 +1623,23 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     }
   } else {
     // Still check for mismatches on every call, but only log warnings (not debug spam)
-    for (unsigned int i = 0; i < temp_count && i < 2; i++) {  // Check first 2 processes
+    // Check ALL processes for PID mismatches - we need to detect all issues
+    for (unsigned int i = 0; i < temp_count; i++) {  // Check ALL processes, not just first 2
       unsigned int safe_pid = extract_pid_safely((void *)&all_infos[i]);
       if (safe_pid != all_infos[i].pid && safe_pid != 0) {
-        // Only warn on actual mismatches - warnings go to console at level >= 1
+        // Log all mismatches to file (for debugging), but throttle console warnings
+        LOG_FILE_DEBUG("RAW_NVML_HOOK Process[%u]: STRUCT MISMATCH - header pid=%u, safe_pid=%u", 
+                     i, all_infos[i].pid, safe_pid);
+        // Only warn on console occasionally to avoid spam
         static unsigned int mismatch_warn_counter = 0;
-        if (++mismatch_warn_counter % 100 == 0) {  // Throttle warnings too
+        if (++mismatch_warn_counter % 100 == 0) {  // Throttle console warnings
           LOG_WARN("RAW_NVML_HOOK Process[%u]: STRUCT MISMATCH - header pid=%u, safe_pid=%u", 
                    i, all_infos[i].pid, safe_pid);
         }
+      } else if (safe_pid == 0 && all_infos[i].pid > 0) {
+        // Log invalid PIDs too (file only to avoid spam)
+        LOG_FILE_DEBUG("RAW_NVML_HOOK Process[%u]: INVALID PID - header pid=%u could not be validated", 
+                     i, all_infos[i].pid);
       }
     }
   }

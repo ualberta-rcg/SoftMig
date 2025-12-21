@@ -392,13 +392,15 @@ typedef struct {
     uint64_t memory;
 } process_memory_info_t;
 
-// Comparison function for qsort - sort by memory descending (highest first)
+// Comparison function for qsort - sort by PID descending (highest/newest first)
+// Higher PID typically means newer process, so we kill newest processes first
 static int compare_process_memory(const void* a, const void* b) {
     const process_memory_info_t* pa = (const process_memory_info_t*)a;
     const process_memory_info_t* pb = (const process_memory_info_t*)b;
     
-    if (pa->memory > pb->memory) return -1;
-    if (pa->memory < pb->memory) return 1;
+    // Sort by PID descending (highest/newest PID first)
+    if (pa->pid > pb->pid) return -1;
+    if (pa->pid < pb->pid) return 1;
     return 0;
 }
 
@@ -629,10 +631,10 @@ int gradual_oom_killer(int cuda_dev) {
         return 0;
     }
     
-    // Sort processes by memory (highest first)
+    // Sort processes by PID (highest/newest first) - kill newest processes first
     qsort(filtered_processes, filtered_count, sizeof(process_memory_info_t), compare_process_memory);
     
-    LOG_ERROR("gradual_oom_killer: Found %u processes on device %d, sorted by memory (highest first)", 
+    LOG_ERROR("gradual_oom_killer: Found %u processes on device %d, sorted by PID (newest/highest PID first)", 
               filtered_count, cuda_dev);
     
     uint64_t limit = get_current_device_memory_limit(cuda_dev);
@@ -659,8 +661,8 @@ int gradual_oom_killer(int cuda_dev) {
             return killed;
         }
         
-        // Kill the process with highest memory
-        LOG_ERROR("gradual_oom_killer: Killing PID %u (memory %llu bytes, device %d)", 
+        // Kill the process with highest PID (newest process first)
+        LOG_ERROR("gradual_oom_killer: Killing PID %u (newest, memory %llu bytes, device %d)", 
                  filtered_processes[i].pid, 
                  (unsigned long long)filtered_processes[i].memory, 
                  cuda_dev);
