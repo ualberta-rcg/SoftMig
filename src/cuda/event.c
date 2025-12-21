@@ -47,12 +47,10 @@ CUresult cuModuleGetGlobal_v2(CUdeviceptr *dptr, size_t *bytes, CUmodule hmod, c
 }
 
 CUresult cuModuleGetTexRef(CUtexref *pTexRef, CUmodule hmod, const char *name) {
-    LOG_INFO("cuModuleGetTexRef");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuModuleGetTexRef,pTexRef,hmod,name);
 }
 
 CUresult cuModuleGetSurfRef(CUsurfref *pSurfRef, CUmodule hmod, const char *name) {
-    LOG_INFO("cuModuleGetSurfRef");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuModuleGetSurfRef,pSurfRef,hmod,name);
 }
 
@@ -88,7 +86,6 @@ CUresult cuFuncSetCacheConfig ( CUfunction hfunc, CUfunc_cache config ){
 }
 
 CUresult cuFuncSetSharedMemConfig(CUfunction hfunc, CUsharedconfig config) {
-    LOG_INFO("cuFuncSetSharedMemConfig");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuFuncSetSharedMemConfig,hfunc,config);
 }
 

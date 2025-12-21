@@ -102,7 +102,6 @@ int try_lock_unified_lock() {
         cnt++;
         fd = open(unified_lock,O_CREAT | O_EXCL,S_IRWXU); 
     }
-    LOG_INFO("try_lock_unified_lock:%d",fd);
     if (fd != -1) {
         close(fd);
         return 0;
@@ -114,7 +113,6 @@ int try_lock_unified_lock() {
 // -1 unified_lock unlock fail
 int try_unlock_unified_lock() {
     int res = remove(unified_lock);
-    LOG_INFO("try unlock_unified_lock:%d",res);
     return res == 0 ? 0 : -1;
 }
 
@@ -159,19 +157,7 @@ int mergepid(unsigned int *prev, unsigned int *current, nvmlProcessInfo_t1 *sub,
 int getextrapid(unsigned int prev, unsigned int current, nvmlProcessInfo_t1 *pre_pids_on_device, nvmlProcessInfo_t1 *pids_on_device) {
     int i,j;
     int found = 0;
-    LOG_INFO("getextrapid: prev=%u current=%u", prev, current);
-    if (prev > 0) {
-        LOG_INFO("Previous PIDs: ");
-        for (i=0; i<prev; i++){
-            LOG_INFO("  [%d]=%u", i, pre_pids_on_device[i].pid);
-        }
-    }
-    if (current > 0) {
-        LOG_INFO("Current PIDs: ");
-        for (i=0; i<current; i++) {
-            LOG_INFO("  [%d]=%u", i, pids_on_device[i].pid);
-        }
-    }
+    LOG_DEBUG("getextrapid: prev=%u current=%u", prev, current);
     if (current-prev<=0) {
         LOG_WARN("getextrapid: current (%u) <= prev (%u), cannot find new PID", current, prev);
         return 0;
@@ -185,7 +171,7 @@ int getextrapid(unsigned int prev, unsigned int current, nvmlProcessInfo_t1 *pre
             }
         }
         if (!found) {
-            LOG_INFO("getextrapid: Found new PID %u (not in previous list)", pids_on_device[i].pid);
+            LOG_DEBUG("getextrapid: Found new PID %u (not in previous list)", pids_on_device[i].pid);
             return pids_on_device[i].pid;
         }
     }
@@ -238,13 +224,9 @@ nvmlReturn_t set_task_pid() {
         }while(res==NVML_ERROR_INSUFFICIENT_SIZE);
         
         // Log raw NVML data before merging (for debugging PID=0 issues and struct mismatches)
-        LOG_INFO("set_task_pid: BEFORE context - NVML returned %u processes on device %d, struct_size=%zu", 
-                 previous, i, sizeof(nvmlProcessInfo_v1_t));
+        LOG_DEBUG("set_task_pid: BEFORE context - NVML returned %u processes on device %d", previous, i);
         for (int k=0; k<previous && k<10; k++) {  // Log first 10 to avoid spam
             unsigned int safe_pid = extract_pid_safely((void *)&tmp_pids_on_device[k]);
-            LOG_INFO("  Raw NVML[%d]: version=%u header_pid=%u safe_pid=%u, memory=%llu", 
-                    k, tmp_pids_on_device[k].version, tmp_pids_on_device[k].pid, safe_pid,
-                    (unsigned long long)tmp_pids_on_device[k].usedGpuMemory);
             if (safe_pid != tmp_pids_on_device[k].pid && safe_pid != 0) {
                 LOG_WARN("  Raw NVML[%d]: STRUCT MISMATCH - header_pid=%u, safe_pid=%u", 
                          k, tmp_pids_on_device[k].pid, safe_pid);
@@ -281,13 +263,9 @@ nvmlReturn_t set_task_pid() {
         }while(res == NVML_ERROR_INSUFFICIENT_SIZE);
         
         // Log raw NVML data after creating context (for debugging PID=0 issues and struct mismatches)
-        LOG_INFO("set_task_pid: AFTER context - NVML returned %u processes on device %d, struct_size=%zu", 
-                 running_processes, i, sizeof(nvmlProcessInfo_v1_t));
+        LOG_DEBUG("set_task_pid: AFTER context - NVML returned %u processes on device %d", running_processes, i);
         for (int k=0; k<running_processes && k<10; k++) {  // Log first 10 to avoid spam
             unsigned int safe_pid = extract_pid_safely((void *)&tmp_pids_on_device[k]);
-            LOG_INFO("  Raw NVML[%d]: version=%u header_pid=%u safe_pid=%u, memory=%llu", 
-                    k, tmp_pids_on_device[k].version, tmp_pids_on_device[k].pid, safe_pid,
-                    (unsigned long long)tmp_pids_on_device[k].usedGpuMemory);
             if (safe_pid != tmp_pids_on_device[k].pid && safe_pid != 0) {
                 LOG_WARN("  Raw NVML[%d]: STRUCT MISMATCH - header_pid=%u, safe_pid=%u", 
                          k, tmp_pids_on_device[k].pid, safe_pid);
@@ -298,29 +276,18 @@ nvmlReturn_t set_task_pid() {
         break;
     }
     running_processes = merged_num;
-    LOG_INFO("set_task_pid: Merged process counts - previous=%u, running=%u", previous, running_processes);
+    LOG_DEBUG("set_task_pid: Merged process counts - previous=%u, running=%u", previous, running_processes);
     
     // With cgroup filtering, try to find our own PID first (most reliable in SLURM/cgroup environments)
     pid_t current_pid = getpid();
     unsigned int hostpid = 0;
     
-    // Log all merged PIDs for debugging
-    if (running_processes > 0) {
-        LOG_INFO("set_task_pid: Merged process list (after filtering):");
-        for (i=0; i<running_processes && i<20; i++) {  // Log up to 20 to avoid spam
-            LOG_INFO("  Merged[%d]: PID=%u %s", i, pids_on_device[i].pid,
-                    (pids_on_device[i].pid == 0) ? "(INVALID!)" : "");
-        }
-    } else {
-        LOG_WARN("set_task_pid: No processes in merged list after filtering!");
-    }
-    
     // Check if our PID is in the filtered process list (after creating CUDA context)
-    LOG_INFO("set_task_pid: Looking for current PID %d in %u filtered processes", current_pid, running_processes);
+    LOG_DEBUG("set_task_pid: Looking for current PID %d in %u filtered processes", current_pid, running_processes);
     for (i=0; i<running_processes; i++) {
         if (pids_on_device[i].pid == (unsigned int)current_pid) {
             hostpid = current_pid;
-            LOG_INFO("set_task_pid: ✓ Found current process PID %d in filtered GPU process list (index %d)", current_pid, i);
+            LOG_DEBUG("set_task_pid: Found current process PID %d in filtered GPU process list", current_pid);
             break;
         }
         if (pids_on_device[i].pid == 0) {
@@ -334,8 +301,12 @@ nvmlReturn_t set_task_pid() {
                  current_pid, running_processes);
         hostpid = getextrapid(previous,running_processes,pre_pids_on_device,pids_on_device);
         if (hostpid != 0) {
-            LOG_INFO("set_task_pid: Difference detection found PID %u", hostpid);
+            LOG_DEBUG("set_task_pid: Difference detection found PID %u", hostpid);
         }
+    }
+    
+    if (running_processes == 0) {
+        LOG_WARN("set_task_pid: No processes in merged list after filtering!");
     }
     
     if (hostpid==0) {
@@ -353,11 +324,11 @@ nvmlReturn_t set_task_pid() {
         hostpid = current_pid;
     }
     
-    LOG_INFO("hostPid=%d",hostpid);
+    LOG_DEBUG("set_task_pid: hostPid=%d",hostpid);
     if (set_host_pid(hostpid)==0) {
         for (i=0;i<running_processes;i++) {
             if (pids_on_device[i].pid==hostpid) {
-                LOG_INFO("Primary Context Size==%lld",tmp_pids_on_device[i].usedGpuMemory);
+                LOG_DEBUG("set_task_pid: Primary Context Size=%lld",(long long)tmp_pids_on_device[i].usedGpuMemory);
                 context_size = tmp_pids_on_device[i].usedGpuMemory; 
                 break;
             }
@@ -383,10 +354,6 @@ int parse_cuda_visible_env() {
             }
         } 
     }
-    for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
-        LOG_INFO("device %d -> %d",i,cuda_to_nvml_map(i));
-    }
-    LOG_INFO("get default cuda from %s", getenv("CUDA_VISIBLE_DEVICES"));
     return count;
 }
 

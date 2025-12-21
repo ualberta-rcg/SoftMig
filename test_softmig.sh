@@ -3,7 +3,7 @@
 # Tests: cudaMalloc, cudaMallocManaged, cudaMallocAsync
 #        cuMemAlloc, cuMemAllocManaged, cuMemCreate/VMM
 
-export LIBCUDA_LOG_LEVEL=5
+export SOFTMIG_LOG_LEVEL=5
 # Try to load CUDA module if available (Compute Canada/CVMFS)
 if command -v module >/dev/null 2>&1; then
     module load cuda/12.2 2>/dev/null || module load cuda 2>/dev/null || true
@@ -343,7 +343,7 @@ if [ -n "$MAIN_LOG" ] && [ -f "$MAIN_LOG" ]; then
     else
         echo "  ⚠️  No process summing logs found"
         echo "     (sum_process_memory_from_nvml may not be called, or logging level too low)"
-        echo "     Set LIBCUDA_LOG_LEVEL=3 or higher to see these logs"
+        echo "     Set SOFTMIG_LOG_LEVEL=3 or higher to see these logs"
     fi
     
     echo ""

@@ -64,7 +64,7 @@ int oom_check_nolock(const int dev, size_t addon) {
 
     // Use summed NVML usage (with 9MB min + 5% overhead) - this is the actual current usage
     // This ensures we check against the real summed values, not tracked usage
-    LOG_INFO("oom_check_nolock: Starting OOM check for device %d - current PID %d, current UID %u, limit=%llu, addon=%lu", 
+    LOG_DEBUG("oom_check_nolock: Starting OOM check for device %d - current PID %d, current UID %u, limit=%llu, addon=%lu", 
              d, getpid(), getuid(), (unsigned long long)limit, addon);
     
     uint64_t _usage = get_summed_device_memory_usage_from_nvml(d);
@@ -77,7 +77,7 @@ int oom_check_nolock(const int dev, size_t addon) {
     }
 
     uint64_t new_allocated = _usage + addon;
-    LOG_INFO("oom_check_nolock: Device %d - _usage=%llu limit=%llu addon=%lu new_allocated=%llu (current PID %d, current UID %u)", 
+    LOG_DEBUG("oom_check_nolock: Device %d - _usage=%llu limit=%llu addon=%lu new_allocated=%llu (current PID %d, current UID %u)", 
              d, (unsigned long long)_usage, (unsigned long long)limit, addon, (unsigned long long)new_allocated, getpid(), getuid());
     
     if (new_allocated > limit) {
@@ -92,7 +92,7 @@ int oom_check_nolock(const int dev, size_t addon) {
             }
             new_allocated = _usage + addon;
             if (new_allocated <= limit) {
-                LOG_INFO("After clearing dead processes, allocation now allowed: %llu / %llu", 
+                LOG_DEBUG("After clearing dead processes, allocation now allowed: %llu / %llu", 
                          (unsigned long long)new_allocated, (unsigned long long)limit);
                 return 0;  // Allocation is now possible
             }

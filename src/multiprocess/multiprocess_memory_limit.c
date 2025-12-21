@@ -211,7 +211,7 @@ int active_oom_killer() {
     
     // Root user is disabled from OOM killing - only non-root users get this treatment
     if (is_root) {
-        LOG_INFO("active_oom_killer: Root user (UID 0) - OOM killer disabled, no processes killed");
+        LOG_DEBUG("active_oom_killer: Root user (UID 0) - OOM killer disabled, no processes killed");
         return 0;
     }
     
@@ -315,13 +315,7 @@ int active_oom_killer() {
             continue;
         }
         
-        LOG_INFO("active_oom_killer: Device %u has %u processes (unfiltered)", dev_idx, process_count);
-        
-        // Log all processes for debugging
-        for (unsigned int i = 0; i < process_count; i++) {
-            LOG_INFO("active_oom_killer: Process[%u]: PID=%u, memory=%llu bytes", 
-                     i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory);
-        }
+        LOG_DEBUG("active_oom_killer: Device %u has %u processes (unfiltered)", dev_idx, process_count);
         
         // Filter and kill processes belonging to current cgroup/UID
         // Only non-root users get this treatment (root is disabled above)
@@ -336,80 +330,48 @@ int active_oom_killer() {
             
             int should_kill = 0;
             
-            // Log all process information from NVML
-            LOG_INFO("active_oom_killer: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx)", 
-                     i, actual_pid, (unsigned long long)infos[i].usedGpuMemory, 
-                     (unsigned long long)infos[i].usedGpuMemory);
-            
             // Filter by cgroup session first, fall back to UID (same logic as memory counting)
             int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
             
-            LOG_INFO("active_oom_killer: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
-                     i, actual_pid, cgroup_check);
-            
             if (cgroup_check == 1) {
                 // Process belongs to current cgroup session - verify UID for extra safety
-                // In SLURM, same cgroup should mean same job/user, but verify to be safe
                 uid_t proc_uid = proc_get_uid(actual_pid);
-                
-                LOG_INFO("active_oom_killer: Process[%u] PID %u - same cgroup, checking UID: proc_uid=%u current_uid=%u", 
-                         i, actual_pid, proc_uid, current_uid);
-                
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                     should_kill = 1;
-                    LOG_ERROR("active_oom_killer: Process[%u] PID %u - WILL KILL (same cgroup session, UID %u matches, memory %llu bytes)", 
-                            i, actual_pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
                 } else {
-                    // Same cgroup but different UID - this shouldn't happen in SLURM, but skip to be safe
-                    LOG_WARN("active_oom_killer: Process[%u] PID %u - SKIPPING (same cgroup but different UID %u != current UID %u, memory %llu bytes)", 
-                             i, actual_pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
+                    LOG_DEBUG("active_oom_killer: Process[%u] PID %u - SKIPPING (same cgroup but different UID %u != current UID %u)", 
+                             i, actual_pid, proc_uid, current_uid);
                 }
             } else if (cgroup_check == -1) {
                 // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
                 uid_t proc_uid = proc_get_uid(actual_pid);
-                
-                LOG_INFO("active_oom_killer: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
-                         i, actual_pid, proc_uid, current_uid);
-                
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                     should_kill = 1;
-                    LOG_ERROR("active_oom_killer: Process[%u] PID %u - WILL KILL (same UID %u, cgroup unavailable, memory %llu bytes)", 
-                            i, actual_pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
                 } else {
-                    LOG_INFO("active_oom_killer: Process[%u] PID %u - SKIPPING (UID %u != current UID %u, memory %llu bytes)", 
-                             i, actual_pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
+                    LOG_DEBUG("active_oom_killer: Process[%u] PID %u - SKIPPING (UID %u != current UID %u)", 
+                             i, actual_pid, proc_uid, current_uid);
                 }
-            } else {
-                // cgroup_check == 0 means different cgroup session - skip it
-                uid_t proc_uid = proc_get_uid(actual_pid);
-                LOG_INFO("active_oom_killer: Process[%u] PID %u - SKIPPING (different cgroup session, proc_uid=%u current_uid=%u, memory %llu bytes)", 
-                         i, actual_pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
             }
             
             if (should_kill) {
                 // Verify process is still alive before killing
                 int proc_state = proc_alive(actual_pid);
-                LOG_INFO("active_oom_killer: Process[%u] PID %u - should_kill=1, proc_alive check: state=%d (0=alive, 1=dead, 2=unknown)", 
-                         i, actual_pid, proc_state);
-                
                 if (proc_state == PROC_STATE_ALIVE) {
-                    LOG_ERROR("active_oom_killer: Process[%u] PID %u - KILLING (device %u, memory %llu bytes)", 
-                             i, actual_pid, dev_idx, (unsigned long long)infos[i].usedGpuMemory);
+                    LOG_ERROR("active_oom_killer: KILLING PID %u (device %u, memory %llu bytes)", 
+                             actual_pid, dev_idx, (unsigned long long)infos[i].usedGpuMemory);
                     int kill_result = kill(actual_pid, SIGKILL);
                     if (kill_result == 0) {
                         total_killed++;
-                        LOG_ERROR("active_oom_killer: Process[%u] PID %u - KILLED successfully (total_killed=%d)", 
-                                 i, actual_pid, total_killed);
+                        LOG_ERROR("active_oom_killer: KILLED PID %u successfully (total_killed=%d)", 
+                                 actual_pid, total_killed);
                     } else {
-                        LOG_WARN("active_oom_killer: Process[%u] PID %u - FAILED to kill: errno=%d (%s)", 
-                                i, actual_pid, errno, strerror(errno));
+                        LOG_WARN("active_oom_killer: FAILED to kill PID %u: errno=%d (%s)", 
+                                actual_pid, errno, strerror(errno));
                     }
                 } else {
-                    LOG_INFO("active_oom_killer: Process[%u] PID %u - already dead (state=%d), skipping kill", 
-                             i, actual_pid, proc_state);
+                    LOG_DEBUG("active_oom_killer: Process PID %u - already dead (state=%d), skipping kill", 
+                             actual_pid, proc_state);
                 }
-            } else {
-                LOG_INFO("active_oom_killer: Process[%u] PID %u - should_kill=0, NOT killing", i, actual_pid);
             }
         }
     }
@@ -663,7 +625,7 @@ int gradual_oom_killer(int cuda_dev) {
     }
     
     if (filtered_count == 0) {
-        LOG_INFO("gradual_oom_killer: No processes found to kill on device %d", cuda_dev);
+        LOG_DEBUG("gradual_oom_killer: No processes found to kill on device %d", cuda_dev);
         return 0;
     }
     
@@ -721,11 +683,11 @@ int gradual_oom_killer(int cuda_dev) {
             usage = get_gpu_memory_usage_nolock(cuda_dev);
         }
         
-        LOG_INFO("gradual_oom_killer: After killing PID %u, usage=%llu limit=%llu", 
+        LOG_DEBUG("gradual_oom_killer: After killing PID %u, usage=%llu limit=%llu", 
                  filtered_processes[i].pid, (unsigned long long)usage, (unsigned long long)limit);
         
         if (usage <= limit) {
-            LOG_INFO("gradual_oom_killer: Memory usage now under limit, stopping");
+            LOG_DEBUG("gradual_oom_killer: Memory usage now under limit, stopping");
             break;
         }
     }
@@ -1233,31 +1195,13 @@ void child_reinit_flag() {
 }
 
 int set_active_oom_killer() {
-    char *oom_killer_env;
-    oom_killer_env = getenv("ACTIVE_OOM_KILLER");
-    if (oom_killer_env!=NULL){
-        if (strcmp(oom_killer_env,"false") == 0)
-            return 0;
-        if (strcmp(oom_killer_env,"true") == 0)
-            return 1;
-        if (strcmp(oom_killer_env,"0")==0)
-            return 0;
-        if (strcmp(oom_killer_env,"1")==0)
-            return 1;
-    }
+    // Always enabled when softmig is active (no env var needed)
     return 1;
 }
 
 int set_env_utilization_switch() {
-    char *utilization_env;
-    utilization_env = getenv("GPU_CORE_UTILIZATION_POLICY");
-    if (utilization_env!=NULL){
-        if ((strcmp(utilization_env,"FORCE") ==0 ) || (strcmp(utilization_env,"force") ==0))
-            return 1;
-        if ((strcmp(utilization_env,"DISABLE") ==0 ) || (strcmp(utilization_env,"disable") ==0 ))
-            return 2;
-    }
-    return 0;
+    // Always enabled when softmig is active (no env var needed)
+    return 1;
 }
 
 void try_create_shrreg() {
@@ -1365,9 +1309,7 @@ void try_create_shrreg() {
         region->sm_init_flag = 0;
         region->utilization_switch = 1;
         region->recent_kernel = 2;
-        region->priority = 1;
-        if (getenv(CUDA_TASK_PRIORITY_ENV)!=NULL)
-            region->priority = atoi(getenv(CUDA_TASK_PRIORITY_ENV));
+        region->priority = 1;  // Default priority (unused, kept for compatibility)
         region->initialized_flag = MULTIPROCESS_SHARED_REGION_MAGIC_FLAG;
     } else {
         if (region->major_version != MAJOR_VERSION || 
@@ -1456,7 +1398,7 @@ int set_host_pid(int hostpid) {
     int i,j,found=0;
     for (i=0;i<region_info.shared_region->proc_num;i++){
         if (region_info.shared_region->procs[i].pid == getpid()){
-            LOG_INFO("SET PID= %d",hostpid);
+            LOG_DEBUG("SET PID= %d",hostpid);
             found=1;
             region_info.shared_region->procs[i].hostpid = hostpid;
             for (j=0;j<CUDA_DEVICE_MAX_COUNT;j++)
@@ -1504,7 +1446,7 @@ int set_current_device_memory_limit(const int dev,size_t newlimit) {
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
     }
-    LOG_INFO("dev %d new limit set to %ld",dev,newlimit);
+    LOG_DEBUG("dev %d new limit set to %ld",dev,newlimit);
     region_info.shared_region->limit[dev]=newlimit;
     return 0; 
 }
@@ -1568,12 +1510,9 @@ int set_recent_kernel(int value){
 }
 
 int get_utilization_switch() {
-    if (env_utilization_switch==1)
-        return 1;
-    if (env_utilization_switch==2)
-        return 0;
+    // Always enabled when softmig is active
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
-        return 0;  // Default when softmig is disabled
+        return 0;  // Disabled when softmig is disabled
     }
     return region_info.shared_region->utilization_switch; 
 }

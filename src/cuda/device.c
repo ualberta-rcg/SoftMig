@@ -32,7 +32,6 @@ CUresult cuDeviceGetName(char *name, int len, CUdevice dev) {
 }
 
 CUresult cuDeviceCanAccessPeer( int* canAccessPeer, CUdevice dev, CUdevice peerDev ) {
-    LOG_INFO("into cuDeviceCanAccessPeer %d %d",dev,peerDev);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceCanAccessPeer,canAccessPeer,dev,peerDev);
 }
 
@@ -49,7 +48,6 @@ CUresult cuDeviceGetByPCIBusId(CUdevice *dev, const char *pciBusId) {
 }
 
 CUresult cuDeviceGetPCIBusId(char *pciBusId, int len, CUdevice dev) {
-    LOG_INFO("into cuDeviceGetPCIBusId dev=%d len=%d",dev,len);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceGetPCIBusId, pciBusId, len,
                         dev);
     return res;
@@ -96,7 +94,6 @@ CUresult cuDriverGetVersion(int *driverVersion) {
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDriverGetVersion,driverVersion);
     //*driverVersion=11030;
     if ((res==CUDA_SUCCESS) && (driverVersion!=NULL)) {
-        LOG_INFO("driver version=%d",*driverVersion);
     }
     return res;
 }

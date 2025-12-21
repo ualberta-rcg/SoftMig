@@ -123,7 +123,7 @@ This document summarizes all changes made to HAMi-core to create softmig for DRA
 
 - `CUDA_DEVICE_MEMORY_LIMIT`: Memory limit (e.g., "24G")
 - `CUDA_DEVICE_SM_LIMIT`: SM utilization (0-100)
-- `LIBCUDA_LOG_LEVEL`: Log verbosity (0-4, default 0=silent)
+- `SOFTMIG_LOG_LEVEL`: Log verbosity (0-4, default 0=silent)
 - `SOFTMIG_LOG_FILE`: Custom log path
 - `SOFTMIG_LOCK_FILE`: Custom lock path
 

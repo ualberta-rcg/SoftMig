@@ -337,7 +337,7 @@ void load_nvml_libraries() {
         // Reduced logging - only log missing functions, not every loaded function
         nvml_library_entry[i].fn_ptr = real_dlsym(table, nvml_library_entry[i].name);
         if (!nvml_library_entry[i].fn_ptr) {
-            LOG_INFO("can't find function %s in %s", nvml_library_entry[i].name,
+            LOG_DEBUG("can't find function %s in %s", nvml_library_entry[i].name,
                 driver_filename);
         }
     }
@@ -502,11 +502,6 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
         usage = limit;
     }
     
-    LOG_INFO("_nvmlDeviceGetMemoryInfo: limit=%llu bytes (%.2f MiB), usage=%llu bytes (%.2f MiB), free=%llu bytes (%.2f MiB)",
-             (unsigned long long)limit, limit / (1024.0 * 1024.0),
-             (unsigned long long)usage, usage / (1024.0 * 1024.0),
-             (unsigned long long)(limit > usage ? (limit - usage) : 0), 
-             (limit > usage ? (limit - usage) : 0) / (1024.0 * 1024.0));
     
     switch (version) {
     case 1:
@@ -557,7 +552,6 @@ nvmlReturn_t nvmlDeviceGetHandleByIndex_v2 ( unsigned int  index, nvmlDevice_t* 
 }
 
 nvmlReturn_t nvmlDeviceGetHandleByPciBusId_v2 ( const char* pciBusId, nvmlDevice_t* device ) {
-    LOG_INFO("NVML DeviceGetHandleByPciBusID_v2 %s",pciBusId);
     return NVML_OVERRIDE_CALL(nvml_library_entry,nvmlDeviceGetHandleByPciBusId_v2,pciBusId,device);
 }
 
@@ -570,7 +564,6 @@ nvmlReturn_t nvmlDeviceGetHandleByPciBusId(const char *pciBusId,
 }
 
 nvmlReturn_t nvmlDeviceGetHandleBySerial ( const char* serial, nvmlDevice_t* device ) {
-    LOG_INFO("NVML DeviceGetHandleBySerial Not supported %s",serial);
     return NVML_OVERRIDE_CALL(nvml_library_entry,nvmlDeviceGetHandleBySerial,serial,device);
 }
 

@@ -276,18 +276,18 @@ void* utilization_watcher() {
           share = delta(upper_limit, userutil[0], share);
           change_token(share);
         }
-        // Log utilization info less frequently (every 10 iterations = ~1.2 seconds)
+        // Log utilization info less frequently (every 10 iterations = ~1.2 seconds) - DEBUG level for console
         static unsigned int util_log_counter = 0;
         if (++util_log_counter >= 10) {
           util_log_counter = 0;
-          LOG_INFO("utilization_watcher[120ms]: userutil1=%d currentcores=%ld total=%ld limit=%d share=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
+          LOG_DEBUG("utilization_watcher[120ms]: userutil=%d%% currentcores=%ld total=%ld limit=%d%% share=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
         }
         
         // Memory monitoring: check every ~5 seconds
         memory_check_counter++;
         if (memory_check_counter >= MEMORY_CHECK_INTERVAL) {
             memory_check_counter = 0;
-            LOG_INFO("utilization_watcher[5s]: Starting memory check cycle - userutil[0]=%d currentcores=%ld share=%ld", 
+            LOG_DEBUG("utilization_watcher[5s]: Starting memory check cycle - userutil[0]=%d%% currentcores=%ld share=%ld", 
                     userutil[0], g_cur_cuda_cores, share);
             
             // Only check memory if softmig is enabled and memory limits are configured
@@ -363,21 +363,21 @@ void* utilization_watcher() {
                             // Trigger gradual OOM killer
                             gradual_oom_killer(cuda_dev);
                         } else {
-                            LOG_INFO("utilization_watcher[5s]: Device %d (CUDA %d) - memory OK: usage=%llu bytes (%.2f GB) limit=%llu bytes (%.2f GB)", 
+                            LOG_DEBUG("utilization_watcher[5s]: Device %d (CUDA %d) - memory OK: usage=%.2f GB limit=%.2f GB", 
                                     dev_idx, cuda_dev, 
-                                    (unsigned long long)usage, usage / (1024.0 * 1024.0 * 1024.0),
-                                    (unsigned long long)limit, limit / (1024.0 * 1024.0 * 1024.0));
+                                    usage / (1024.0 * 1024.0 * 1024.0),
+                                    limit / (1024.0 * 1024.0 * 1024.0));
                         }
                     }
                 }
             }
-            LOG_INFO("utilization_watcher[5s]: Completed memory check cycle");
+            LOG_DEBUG("utilization_watcher[5s]: Completed memory check cycle");
         }
     }
 }
 
 void init_utilization_watcher() {
-    LOG_INFO("set core utilization limit to  %d",get_current_device_sm_limit(0));
+    LOG_DEBUG("init_utilization_watcher: core utilization limit set to %d%%",get_current_device_sm_limit(0));
     setspec();
     pthread_t tid;
     if ((get_current_device_sm_limit(0)<=100) && (get_current_device_sm_limit(0)>0)){

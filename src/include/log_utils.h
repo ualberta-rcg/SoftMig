@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <time.h>
 #include <sys/stat.h>
@@ -107,77 +108,79 @@ static inline char* get_log_file_path(void) {
     return log_path;
 }
 
-// All logs go to file only - never to stderr (Compute Canada/Digital Research Alliance optimized)
-// Logs are completely silent to users unless explicitly enabled via LIBCUDA_LOG_LEVEL
+// Log level system:
+// 0 = errors only (default)
+// 1 = errors + warns
+// 2 = errors + warns + debug
+// 3 = errors + warns + debug + info
+// Console logging enabled for level >= 2 (debug mode) for important loops
+
+static inline int get_log_level(void) {
+    static int cached_level = -1;
+    if (cached_level == -1) {
+        char* log_level_str = getenv("SOFTMIG_LOG_LEVEL");
+        cached_level = log_level_str ? atoi(log_level_str) : 0;
+    }
+    return cached_level;
+}
+
+static inline void log_to_file_and_console(const char* prefix, const char* msg, ...) {
+    va_list args;
+    va_start(args, msg);
+    
+    // Always log to file
+    if (fp1 == NULL) {
+        char* log_path = get_log_file_path();
+        fp1 = fopen(log_path, "a");
+    }
+    if (fp1 != NULL) {
+        fprintf(fp1, "[softmig %s(%d:%ld:%s:%d)]: ", prefix, getpid(), pthread_self(), basename(__FILE__), __LINE__);
+        vfprintf(fp1, msg, args);
+        fprintf(fp1, "\n");
+        fflush(fp1);
+    }
+    
+    // Console logging for debug mode (level >= 2)
+    int log_level = get_log_level();
+    if (log_level >= 2) {
+        fprintf(stderr, "[softmig %s]: ", prefix);
+        vfprintf(stderr, msg, args);
+        fprintf(stderr, "\n");
+    }
+    
+    va_end(args);
+}
+
 #define LOG_DEBUG(msg, ...) { \
-    char* log_level_str = getenv("LIBCUDA_LOG_LEVEL"); \
-    int log_level = log_level_str ? atoi(log_level_str) : 0; \
-    if (log_level >= 4) { \
-        if (fp1 == NULL) { \
-            char* log_path = get_log_file_path(); \
-            fp1 = fopen(log_path, "a"); \
-        } \
-        if (fp1 != NULL) { \
-            fprintf(fp1, "[softmig Debug(%d:%ld:%s:%d)]: "msg"\n", getpid(), pthread_self(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-            fflush(fp1); \
-        } \
+    int log_level = get_log_level(); \
+    if (log_level >= 2) { \
+        log_to_file_and_console("Debug", msg, ##__VA_ARGS__); \
     } \
 }
 
 #define LOG_INFO(msg, ...) { \
-    char* log_level_str = getenv("LIBCUDA_LOG_LEVEL"); \
-    int log_level = log_level_str ? atoi(log_level_str) : 0; \
+    int log_level = get_log_level(); \
     if (log_level >= 3) { \
-        if (fp1 == NULL) { \
-            char* log_path = get_log_file_path(); \
-            fp1 = fopen(log_path, "a"); \
-        } \
-        if (fp1 != NULL) { \
-            fprintf(fp1, "[softmig Info(%d:%ld:%s:%d)]: "msg"\n", getpid(), pthread_self(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-            fflush(fp1); \
-        } \
+        log_to_file_and_console("Info", msg, ##__VA_ARGS__); \
     } \
 }
 
 #define LOG_WARN(msg, ...) { \
-    char* log_level_str = getenv("LIBCUDA_LOG_LEVEL"); \
-    int log_level = log_level_str ? atoi(log_level_str) : 0; \
-    if (log_level >= 2) { \
-        if (fp1 == NULL) { \
-            char* log_path = get_log_file_path(); \
-            fp1 = fopen(log_path, "a"); \
-        } \
-        if (fp1 != NULL) { \
-            fprintf(fp1, "[softmig Warn(%d:%ld:%s:%d)]: "msg"\n", getpid(), pthread_self(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-            fflush(fp1); \
-        } \
+    int log_level = get_log_level(); \
+    if (log_level >= 1) { \
+        log_to_file_and_console("Warn", msg, ##__VA_ARGS__); \
     } \
 }
 
 #define LOG_MSG(msg, ...) { \
-    char* log_level_str = getenv("LIBCUDA_LOG_LEVEL"); \
-    int log_level = log_level_str ? atoi(log_level_str) : 0; \
-    if (log_level >= 2) { \
-        if (fp1 == NULL) { \
-            char* log_path = get_log_file_path(); \
-            fp1 = fopen(log_path, "a"); \
-        } \
-        if (fp1 != NULL) { \
-            fprintf(fp1, "[softmig Msg(%d:%ld:%s:%d)]: "msg"\n", getpid(), pthread_self(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-            fflush(fp1); \
-        } \
+    int log_level = get_log_level(); \
+    if (log_level >= 1) { \
+        log_to_file_and_console("Msg", msg, ##__VA_ARGS__); \
     } \
 }
 
 #define LOG_ERROR(msg, ...) { \
-    if (fp1 == NULL) { \
-        char* log_path = get_log_file_path(); \
-        fp1 = fopen(log_path, "a"); \
-    } \
-    if (fp1 != NULL) { \
-        fprintf(fp1, "[softmig ERROR (pid:%d thread=%ld %s:%d)]: "msg"\n", getpid(), pthread_self(), basename(__FILE__), __LINE__, ##__VA_ARGS__); \
-        fflush(fp1); \
-    } \
+    log_to_file_and_console("ERROR", msg, ##__VA_ARGS__); \
 }
 
 #define CHECK_DRV_API(f)  {                   \

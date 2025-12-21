@@ -1749,13 +1749,13 @@ nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
         continue;  // Skip if we can't get a valid PID
       }
       
-      LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx)", 
+      LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] - PID=%u, usedGpuMemory=%llu bytes", 
                i, actual_pid, (unsigned long long)all_infos[i].usedGpuMemory, 
                (unsigned long long)all_infos[i].usedGpuMemory);
       
       int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
       
-      LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
+      LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - cgroup_check=%d", 
                i, actual_pid, cgroup_check);
       
       int should_include = 0;
@@ -1764,26 +1764,26 @@ nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
         // Process belongs to current cgroup session - include it
         should_include = 1;
         uid_t proc_uid = proc_get_uid(actual_pid);
-        LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same cgroup, proc_uid=%u current_uid=%u)", 
+        LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same cgroup, proc_uid=%u current_uid=%u)", 
                  i, actual_pid, proc_uid, current_uid);
       } else if (cgroup_check == -1) {
         // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
         uid_t proc_uid = proc_get_uid(actual_pid);
         
-        LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
+        LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
                  i, actual_pid, proc_uid, current_uid);
         if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
           should_include = 1;
-          LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same UID %u, cgroup unavailable)", 
+          LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same UID %u, cgroup unavailable)", 
                    i, actual_pid, proc_uid);
         } else {
-          LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (UID %u != current %u)", 
+          LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (UID %u != current %u)", 
                    i, actual_pid, proc_uid, current_uid);
         }
       } else {
         // cgroup_check == 0 means different cgroup session - exclude it
         uid_t proc_uid = proc_get_uid(actual_pid);
-        LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (different cgroup session, proc_uid=%u current_uid=%u)", 
+        LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (different cgroup session, proc_uid=%u current_uid=%u)", 
                  i, actual_pid, proc_uid, current_uid);
       }
       

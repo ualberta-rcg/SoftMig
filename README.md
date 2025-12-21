@@ -120,7 +120,7 @@ sudo cp build/libsoftmig.so /var/lib/shared/
 - `CUDA_DEVICE_MEMORY_LIMIT`: Memory limit (e.g., `16g`, `24G`)
 - `CUDA_DEVICE_SM_LIMIT`: SM utilization percentage (0-100). Limits GPU compute capacity by throttling kernel launches. Only monitors device 0 (intentional - fractional GPU jobs only get 1 GPU).
 - `LD_PRELOAD`: Path to `libsoftmig.so` (for testing only - production uses `/etc/ld.so.preload`)
-- `LIBCUDA_LOG_LEVEL`: Log verbosity (0=errors only, 4=debug, default 0)
+- `SOFTMIG_LOG_LEVEL`: Log verbosity (0=errors only, 4=debug, default 0)
 
 ### Quick Test
 
@@ -184,7 +184,7 @@ Logs fall back to `$SLURM_TMPDIR/softmig_{jobid}.log` (or `$SLURM_TMPDIR/softmig
 
 Logs are written to `/var/log/softmig/{jobid}.log` and are completely silent to users by default.
 
-Use `LIBCUDA_LOG_LEVEL` to control verbosity:
+Use `SOFTMIG_LOG_LEVEL` to control verbosity:
 - `0` (default): errors only
 - `2`: errors, warnings, messages
 - `3`: info, errors, warnings, messages
@@ -282,7 +282,7 @@ Or install manually (see Building section above for full steps).
 **Log Files:**
 - Location: `/var/log/softmig/{jobid}.log`
 - View: `tail -f /var/log/softmig/*.log` (as admin)
-- Silent to users by default (set `LIBCUDA_LOG_LEVEL=2` in job for debugging)
+- Silent to users by default (set `SOFTMIG_LOG_LEVEL=2` in job for debugging)
 
 **Cache Files:**
 - Location: `$SLURM_TMPDIR/cudevshr.cache.{jobid}` or `$SLURM_TMPDIR/cudevshr.cache.{jobid}.{arrayid}` (auto-cleaned when job ends)

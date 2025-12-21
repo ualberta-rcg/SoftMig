@@ -82,10 +82,27 @@ static int read_config_value(const char* key, char* value, size_t value_size) {
     return 0;  // Key not found in config file
 }
 
+// Cache for config values to avoid reading file multiple times
+#define MAX_CACHED_KEYS 4
+static struct {
+    char key[64];
+    size_t value;
+    int cached;
+} config_cache[MAX_CACHED_KEYS] = {0};
+
 // Get limit from config file or environment variable
 // Priority: config file > environment variable
+// Results are cached to avoid reading the file multiple times
 size_t get_limit_from_config_or_env(const char* env_name) {
+    // Check cache first
+    for (int i = 0; i < MAX_CACHED_KEYS; i++) {
+        if (config_cache[i].cached && strcmp(config_cache[i].key, env_name) == 0) {
+            return config_cache[i].value;
+        }
+    }
+    
     char config_value[256] = {0};
+    size_t result = 0;
     
     // Try to read from config file first (if in SLURM job)
     if (read_config_value(env_name, config_value, sizeof(config_value))) {
@@ -127,54 +144,65 @@ size_t get_limit_from_config_or_env(const char* env_name) {
         }
         
         LOG_DEBUG("Read %s=%s from config file", env_name, config_value);
-        return scaled_res;
-    }
-    
-    // Fallback to environment variable (for non-SLURM or if config file doesn't exist)
-    char* env_limit = getenv(env_name);
-    if (env_limit == NULL) {
-        return 0;
-    }
-    
-    size_t len = strlen(env_limit);
-    if (len == 0) {
-        return 0;
-    }
-    
-    size_t scalar = 1;
-    char* digit_end = env_limit + len;
-    if (env_limit[len - 1] == 'G' || env_limit[len - 1] == 'g') {
-        digit_end -= 1;
-        scalar = 1024 * 1024 * 1024;
-    } else if (env_limit[len - 1] == 'M' || env_limit[len - 1] == 'm') {
-        digit_end -= 1;
-        scalar = 1024 * 1024;
-    } else if (env_limit[len - 1] == 'K' || env_limit[len - 1] == 'k') {
-        digit_end -= 1;
-        scalar = 1024;
-    }
-    
-    size_t res = strtoul(env_limit, &digit_end, 0);
-    size_t scaled_res = res * scalar;
-    
-    if (scaled_res == 0) {
-        if (strstr(env_name, "SM_LIMIT") != NULL) {
-            LOG_INFO("device core util limit set to 0, which means no limit: %s=%s",
-                env_name, env_limit);
-        } else if (strstr(env_name, "MEMORY_LIMIT") != NULL) {
-            LOG_WARN("invalid device memory limit %s=%s", env_name, env_limit);
+        result = scaled_res;
+    } else {
+        // Fallback to environment variable (for non-SLURM or if config file doesn't exist)
+        char* env_limit = getenv(env_name);
+        if (env_limit == NULL) {
+            result = 0;
         } else {
-            LOG_WARN("invalid env name:%s", env_name);
+            size_t len = strlen(env_limit);
+            if (len == 0) {
+                result = 0;
+            } else {
+                size_t scalar = 1;
+                char* digit_end = env_limit + len;
+                if (env_limit[len - 1] == 'G' || env_limit[len - 1] == 'g') {
+                    digit_end -= 1;
+                    scalar = 1024 * 1024 * 1024;
+                } else if (env_limit[len - 1] == 'M' || env_limit[len - 1] == 'm') {
+                    digit_end -= 1;
+                    scalar = 1024 * 1024;
+                } else if (env_limit[len - 1] == 'K' || env_limit[len - 1] == 'k') {
+                    digit_end -= 1;
+                    scalar = 1024;
+                }
+                
+                size_t res = strtoul(env_limit, &digit_end, 0);
+                size_t scaled_res = res * scalar;
+                
+                if (scaled_res == 0) {
+                    if (strstr(env_name, "SM_LIMIT") != NULL) {
+                        LOG_INFO("device core util limit set to 0, which means no limit: %s=%s",
+                            env_name, env_limit);
+                    } else if (strstr(env_name, "MEMORY_LIMIT") != NULL) {
+                        LOG_WARN("invalid device memory limit %s=%s", env_name, env_limit);
+                    } else {
+                        LOG_WARN("invalid env name:%s", env_name);
+                    }
+                    result = 0;
+                } else if (scaled_res != 0 && scaled_res / scalar != res) {
+                    LOG_ERROR("Limit overflow: %s=%s", env_name, env_limit);
+                    result = 0;
+                } else {
+                    result = scaled_res;
+                }
+            }
         }
-        return 0;
     }
     
-    if (scaled_res != 0 && scaled_res / scalar != res) {
-        LOG_ERROR("Limit overflow: %s=%s", env_name, env_limit);
-        return 0;
+    // Cache the result
+    for (int i = 0; i < MAX_CACHED_KEYS; i++) {
+        if (!config_cache[i].cached) {
+            strncpy(config_cache[i].key, env_name, sizeof(config_cache[i].key) - 1);
+            config_cache[i].key[sizeof(config_cache[i].key) - 1] = '\0';
+            config_cache[i].value = result;
+            config_cache[i].cached = 1;
+            break;
+        }
     }
     
-    return scaled_res;
+    return result;
 }
 
 // Check if softmig should be active (either CUDA_DEVICE_MEMORY_LIMIT or CUDA_DEVICE_SM_LIMIT is set)

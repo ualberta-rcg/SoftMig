@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <sys/stat.h>
 #include <string.h>
+#include <unistd.h>
 // Include nvml-subset.h for nvmlProcessInfo_t definition
 #define NVML_NO_UNVERSIONED_FUNC_DEFS
 #include "include/nvml-subset.h"
@@ -253,8 +254,7 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
  * Safely extract PID from nvmlProcessInfo_t, handling struct mismatches
  * between CUDA toolkit headers and driver library.
  * 
- * This function checks if the PID field contains a valid value, and if not,
- * scans the struct for a valid PID value. This handles cases where:
+ * This function scans the struct for a valid PID value, handling cases where:
  * - CUDA 12.2 headers define struct one way
  * - Driver 570.x (CUDA 12.8) has different struct layout
  * 
@@ -262,37 +262,44 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
  * @return Valid PID if found, 0 if not found
  */
 unsigned int extract_pid_safely(void *proc) {
-    nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
     unsigned char *raw = (unsigned char *)proc;
     
-    // Check standard offset first (assuming pid is at offset 4 after version)
-    unsigned int pid = info->pid;
-    if (pid > 1 && pid < 4000000) {
-        // Valid PID range - likely correct
-        return pid;
-    }
-    
-    // Struct mismatch detected - scan for valid PID
-    LOG_WARN("NVML struct mismatch detected (PID=%u invalid), scanning for PID", pid);
-    
+    // Scan for valid PID in the struct
     // Scan first 16 bytes (covers version + pid + start of usedGpuMemory)
     // PID is typically at offset 4 (after version) or 0 (if version is missing)
     for (int offset = 0; offset <= 12; offset += 4) {
         unsigned int candidate = *(unsigned int*)(raw + offset);
-        if (candidate > 1 && candidate < 4000000) {
-            // Verify this looks like a real PID by checking /proc
-            char path[64];
-            snprintf(path, sizeof(path), "/proc/%u", candidate);
-            struct stat st;
-            if (stat(path, &st) == 0) {
-                LOG_INFO("Found valid PID %u at offset %d (original pid field was %u)", 
-                        candidate, offset, pid);
-                return candidate;
+        
+        // Skip invalid PID ranges
+        if (candidate < 100 || candidate > 4000000) continue;
+        if (candidate == 0xffffffff) continue;
+        
+        // Verify it's a real process by checking /proc/%u/cmdline
+        // Using cmdline is more reliable than just checking the directory
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%u/cmdline", candidate);
+        if (access(path, F_OK) == 0) {
+            // Also check the standard field to see if there was a mismatch
+            nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
+            if (candidate != info->pid) {
+                LOG_DEBUG("extract_pid_safely: Found PID %u at offset %d (header pid field was %u)", 
+                         candidate, offset, info->pid);
             }
+            return candidate;
         }
     }
     
-    LOG_WARN("Could not find valid PID in struct (original pid=%u)", pid);
+    // If we get here, try the standard field as a last resort
+    nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
+    unsigned int pid = info->pid;
+    if (pid >= 100 && pid < 4000000 && pid != 0xffffffff) {
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%u/cmdline", pid);
+        if (access(path, F_OK) == 0) {
+            return pid;
+        }
+    }
+    
     return 0;
 }
 

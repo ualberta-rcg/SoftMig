@@ -953,7 +953,6 @@ void postInit(){
 }
 
 CUresult cuInit(unsigned int Flags){
-    LOG_INFO("Into cuInit");
     pthread_once(&pre_cuinit_flag,(void(*)(void))preInit);
     ENSURE_INITIALIZED();
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuInit,Flags);

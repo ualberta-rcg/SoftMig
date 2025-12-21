@@ -12,7 +12,6 @@ CUresult cuDevicePrimaryCtxGetState( CUdevice dev, unsigned int* flags, int* act
 }
 
 CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev){
-    LOG_INFO("dev=%d context_size=%ld",dev,context_size);
     //for Initialization only
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDevicePrimaryCtxRetain,pctx,dev);
     if (ctx_activate[dev] == 0) {
@@ -62,7 +61,6 @@ CUresult cuCtxDestroy_v2 ( CUcontext ctx ){
 }
 
 CUresult cuCtxGetApiVersion ( CUcontext ctx, unsigned int* version ){
-    LOG_INFO("into cuCtxGetApiVersion ctx=%p",ctx);
     CUresult res =  CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetApiVersion,ctx,version);
     if (res!=CUDA_SUCCESS){
         LOG_ERROR("cuCtxGetApiVersion res=%d",res);
@@ -104,12 +102,10 @@ CUresult cuCtxGetStreamPriorityRange ( int* leastPriority, int* greatestPriority
 }
 
 CUresult cuCtxPopCurrent_v2 ( CUcontext* pctx ){
-    LOG_INFO("cuCtxPopCurrent pctx=%p",pctx);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxPopCurrent_v2,pctx);
 }
 
 CUresult cuCtxPushCurrent_v2 ( CUcontext ctx ){
-    LOG_INFO("cuCtxPushCurrent ctx=%p",ctx);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxPushCurrent_v2,ctx);
 }
 
