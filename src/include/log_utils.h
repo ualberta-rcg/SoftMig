@@ -128,13 +128,27 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
     va_list args;
     va_start(args, msg);
     
+    // Thread-safe basename: copy __FILE__ first since basename() may modify its argument
+    // Use local buffer (thread-safe since each thread has its own stack)
+    char file_buf[256];
+    const char* file_name = __FILE__;
+    if (strlen(file_name) < sizeof(file_buf)) {
+        strncpy(file_buf, file_name, sizeof(file_buf) - 1);
+        file_buf[sizeof(file_buf) - 1] = '\0';
+        file_name = basename(file_buf);
+    } else {
+        // Fallback if path is too long - just use last component manually
+        const char* last_slash = strrchr(file_name, '/');
+        file_name = (last_slash != NULL) ? (last_slash + 1) : file_name;
+    }
+    
     // Always log to file
     if (fp1 == NULL) {
         char* log_path = get_log_file_path();
         fp1 = fopen(log_path, "a");
     }
     if (fp1 != NULL) {
-        fprintf(fp1, "[softmig %s(%d:%ld:%s:%d)]: ", prefix, getpid(), pthread_self(), basename(__FILE__), __LINE__);
+        fprintf(fp1, "[softmig %s(%d:%ld:%s:%d)]: ", prefix, getpid(), (long)pthread_self(), file_name, __LINE__);
         vfprintf(fp1, msg, args);
         fprintf(fp1, "\n");
         fflush(fp1);
@@ -143,9 +157,13 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
     // Console logging for debug mode (level >= 2)
     int log_level = get_log_level();
     if (log_level >= 2) {
+        // CRITICAL: va_list cannot be reused after vfprintf - must use va_copy
+        va_list args2;
+        va_copy(args2, args);
         fprintf(stderr, "[softmig %s]: ", prefix);
-        vfprintf(stderr, msg, args);
+        vfprintf(stderr, msg, args2);
         fprintf(stderr, "\n");
+        va_end(args2);
     }
     
     va_end(args);
