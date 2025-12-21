@@ -321,8 +321,10 @@ void load_nvml_libraries() {
                 real_dlsym = (fp_dlsym)_dl_sym(RTLD_NEXT, "dlsym", (void*)dlsym);
             }
             #endif
-            if (real_dlsym == NULL)
+            if (real_dlsym == NULL) {
                 LOG_ERROR("real dlsym not found - all methods failed");
+                return;  // CRITICAL: Return early if we can't get real_dlsym to avoid segfault
+            }
         }
     }
     snprintf(driver_filename, FILENAME_MAX - 1, "%s", "libnvidia-ml.so.1");
@@ -330,7 +332,8 @@ void load_nvml_libraries() {
 
     table = dlopen(driver_filename, RTLD_NOW | RTLD_NODELETE);
     if (!table) {
-        LOG_WARN("can't find library %s", driver_filename);  
+        LOG_WARN("can't find library %s", driver_filename);
+        return;  // CRITICAL: Return early if we can't open the library to avoid segfault
     }
     int i;
     for (i = 0; i < NVML_ENTRY_END; i++) {
@@ -581,7 +584,7 @@ nvmlReturn_t nvmlDeviceGetCount_v2 ( unsigned int* deviceCount ) {
 }
 
 nvmlReturn_t nvmlInitWithFlags( unsigned int  flags ) {
-    LOG_DEBUG("nvmlInitWithFlags")
+    LOG_DEBUG("nvmlInitWithFlags");
     pthread_once(&init_virtual_map_pre_flag, (void(*) (void))nvml_preInit);
     nvmlReturn_t res =  NVML_OVERRIDE_CALL(nvml_library_entry, nvmlInitWithFlags,flags);
     pthread_once(&init_virtual_map_post_flag,(void (*)(void))nvml_postInit);
@@ -589,7 +592,7 @@ nvmlReturn_t nvmlInitWithFlags( unsigned int  flags ) {
 }
 
 nvmlReturn_t nvmlInit(void) {
-    LOG_DEBUG("nvmlInit")
+    LOG_DEBUG("nvmlInit");
     pthread_once(&init_virtual_map_pre_flag,(void (*)(void))nvml_preInit);
     nvmlReturn_t res = NVML_OVERRIDE_CALL(nvml_library_entry, nvmlInit_v2);
     pthread_once(&init_virtual_map_post_flag,(void (*)(void))nvml_postInit);
