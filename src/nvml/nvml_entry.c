@@ -1,6 +1,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <time.h>
 #include "include/nvml_prefix.h"
 #include "include/libnvml_hook.h"
 #include "include/utils.h"
@@ -1557,6 +1558,16 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     return ret;
   }
   
+  // #region agent log - Log RAW NVML response structure to check for field swapping/corruption
+  for (unsigned int i = 0; i < temp_count && i < 20; i++) {
+    LOG_DEBUG("RAW_NVML_HOOK Process[%u]: pid=%u (0x%x) memory=%llu (0x%llx) struct_size=%zu", 
+              i, all_infos[i].pid, all_infos[i].pid,
+              (unsigned long long)all_infos[i].usedGpuMemory,
+              (unsigned long long)all_infos[i].usedGpuMemory,
+              sizeof(nvmlProcessInfo_t));
+  }
+  // #endregion
+  
   // Filter by current cgroup session (or UID if not in cgroup, unless root)
   uid_t current_uid = getuid();
   unsigned int filtered_count = 0;
@@ -1579,43 +1590,20 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
       }
     } else {
       // Non-root users: filter by cgroup session first, fall back to UID
-      LOG_INFO("nvmlDeviceGetComputeRunningProcesses_v2: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx)", 
-               i, all_infos[i].pid, (unsigned long long)all_infos[i].usedGpuMemory, 
-               (unsigned long long)all_infos[i].usedGpuMemory);
-      
       int cgroup_check = proc_belongs_to_current_cgroup_session(all_infos[i].pid);
-      
-      LOG_INFO("nvmlDeviceGetComputeRunningProcesses_v2: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
-               i, all_infos[i].pid, cgroup_check);
-      
       int should_include = 0;
       
       if (cgroup_check == 1) {
         // Process belongs to current cgroup session - include it
         should_include = 1;
         uid_t proc_uid = proc_get_uid(all_infos[i].pid);
-        LOG_INFO("nvmlDeviceGetComputeRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same cgroup, proc_uid=%u current_uid=%u)", 
-                 i, all_infos[i].pid, proc_uid, current_uid);
       } else if (cgroup_check == -1) {
         // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
         uid_t proc_uid = proc_get_uid(all_infos[i].pid);
         
-        LOG_INFO("nvmlDeviceGetComputeRunningProcesses_v2: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
-                 i, all_infos[i].pid, proc_uid, current_uid);
-        
         if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
           should_include = 1;
-          LOG_INFO("nvmlDeviceGetComputeRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same UID %u, cgroup unavailable)", 
-                   i, all_infos[i].pid, proc_uid);
-        } else {
-          LOG_INFO("nvmlDeviceGetComputeRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (UID %u != current %u)", 
-                   i, all_infos[i].pid, proc_uid, current_uid);
         }
-      } else {
-        // cgroup_check == 0 means different cgroup session - exclude it
-        uid_t proc_uid = proc_get_uid(all_infos[i].pid);
-        LOG_INFO("nvmlDeviceGetComputeRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (different cgroup session, proc_uid=%u current_uid=%u)", 
-                 i, all_infos[i].pid, proc_uid, current_uid);
       }
       
       if (should_include) {

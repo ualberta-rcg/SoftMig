@@ -590,6 +590,16 @@ int gradual_oom_killer(int cuda_dev) {
         return -1;
     }
     
+    // #region agent log - Log RAW NVML response from gradual_oom_killer (bypasses hook)
+    for (unsigned int i = 0; i < process_count && i < 20; i++) {
+        LOG_DEBUG("RAW_NVML_BYPASS Process[%u]: pid=%u (0x%x) memory=%llu (0x%llx) struct_size=%zu", 
+                  i, infos[i].pid, infos[i].pid,
+                  (unsigned long long)infos[i].usedGpuMemory,
+                  (unsigned long long)infos[i].usedGpuMemory,
+                  sizeof(nvmlProcessInfo_t));
+    }
+    // #endregion
+    
     // Filter processes belonging to current cgroup/UID and collect them
     process_memory_info_t filtered_processes[SHARED_REGION_MAX_PROCESS_NUM];
     unsigned int filtered_count = 0;
@@ -840,58 +850,27 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     uid_t current_uid = getuid();
     pid_t current_pid = getpid();
     
-    LOG_INFO("get_summed_device_memory_usage_from_nvml: Starting memory calculation for CUDA device %d (NVML device %u) - current PID %d, current UID %u, found %u processes", 
-             cuda_dev, nvml_dev_idx, current_pid, current_uid, process_count);
-    
     // Sum up memory from all processes belonging to current SLURM job (or current user if not in SLURM)
     for (unsigned int i = 0; i < process_count; i++) {
-        // Log all process information from NVML
-        LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx), NVML_VALUE_NOT_AVAILABLE=%llu", 
-                 i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory, 
-                 (unsigned long long)infos[i].usedGpuMemory,
-                 (unsigned long long)NVML_VALUE_NOT_AVAILABLE_ULL);
-        
         // First try to check if process belongs to current cgroup session
         int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
-        
-        LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
-                 i, infos[i].pid, cgroup_check);
         
         if (cgroup_check == -1) {
             // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
             uid_t proc_uid = proc_get_uid(infos[i].pid);
             
-            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
-                     i, infos[i].pid, proc_uid, current_uid);
-            
             if (proc_uid == (uid_t)-1) {
                 // Couldn't read UID - skip this process to avoid blocking on shared region lock
-                // We don't want to block nvidia-smi or other tools if another process is holding the lock
-                // If the process belongs to us, it will be counted when we can read its UID
-                LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - could not read UID, skipping (avoiding lock contention)", 
+                LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - could not read UID, skipping", 
                          i, infos[i].pid);
                 continue;
             } else if (proc_uid != current_uid) {
-                LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - skipping (UID %u != current UID %u)", 
-                         i, infos[i].pid, proc_uid, current_uid);
                 continue;
-            } else {
-                LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - UID match, including in usage calculation", 
-                         i, infos[i].pid);
             }
         } else if (cgroup_check == 0) {
             // Process is in a different cgroup session - skip it
-            uid_t proc_uid = proc_get_uid(infos[i].pid);
-            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - skipping (different cgroup session, proc_uid=%u current_uid=%u)", 
-                     i, infos[i].pid, proc_uid, current_uid);
             continue;
-        } else {
-            // cgroup_check == 1 means process belongs to current cgroup session
-            uid_t proc_uid = proc_get_uid(infos[i].pid);
-            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - same cgroup session, including (proc_uid=%u current_uid=%u)", 
-                     i, infos[i].pid, proc_uid, current_uid);
         }
-        // cgroup_check == 1 means process belongs to current cgroup session - include it
         
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
@@ -900,23 +879,11 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
             uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
             uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
             total_usage += process_mem_counted;
-            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - counted: raw=%llu overhead=%llu final=%llu (min=%llu), total_usage now=%llu", 
-                     i, infos[i].pid, 
-                     (unsigned long long)process_mem,
-                     (unsigned long long)process_mem_with_overhead,
-                     (unsigned long long)process_mem_counted,
-                     (unsigned long long)MIN_PROCESS_MEMORY,
-                     (unsigned long long)total_usage);
         } else {
             // Even if NVML reports 0 or unavailable, count minimum for the process
             total_usage += MIN_PROCESS_MEMORY;
-            LOG_INFO("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - memory unavailable/zero, counting minimum %llu, total_usage now=%llu", 
-                     i, infos[i].pid, (unsigned long long)MIN_PROCESS_MEMORY, (unsigned long long)total_usage);
         }
     }
-    
-    LOG_INFO("get_summed_device_memory_usage_from_nvml: Final total_usage=%llu bytes for CUDA device %d", 
-             (unsigned long long)total_usage, cuda_dev);
     
     return total_usage;
 }
