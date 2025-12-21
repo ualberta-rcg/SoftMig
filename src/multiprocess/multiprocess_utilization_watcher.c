@@ -276,18 +276,18 @@ void* utilization_watcher() {
           share = delta(upper_limit, userutil[0], share);
           change_token(share);
         }
-        // Log utilization info every ~5 seconds (42 iterations = 5.04 seconds) - DEBUG level for console
+        // Log utilization info every ~5 seconds (42 iterations = 5.04 seconds) - INFO level for console (level >= 3)
         static unsigned int util_log_counter = 0;
         if (++util_log_counter >= MEMORY_CHECK_INTERVAL) {
           util_log_counter = 0;
-          LOG_DEBUG("utilization_watcher[5s]: userutil=%d%% currentcores=%ld total=%ld limit=%d%% share=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
+          LOG_INFO("utilization_watcher[5s]: userutil=%d%% currentcores=%ld total=%ld limit=%d%% share=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
         }
         
         // Memory monitoring: check every ~5 seconds
         memory_check_counter++;
         if (memory_check_counter >= MEMORY_CHECK_INTERVAL) {
             memory_check_counter = 0;
-            LOG_DEBUG("utilization_watcher[5s]: Starting memory check cycle - userutil[0]=%d%% currentcores=%ld share=%ld", 
+            LOG_FILE_DEBUG("utilization_watcher[5s]: Starting memory check cycle - userutil[0]=%d%% currentcores=%ld share=%ld", 
                     userutil[0], g_cur_cuda_cores, share);
             
             // Only check memory if softmig is enabled and memory limits are configured
@@ -363,7 +363,8 @@ void* utilization_watcher() {
                             // Trigger gradual OOM killer
                             gradual_oom_killer(cuda_dev);
                         } else {
-                            LOG_DEBUG("utilization_watcher[5s]: Device %d (CUDA %d) - memory OK: usage=%.2f GB limit=%.2f GB", 
+                            // Log memory usage as INFO (useful for users) - shows on console at level >= 3
+                            LOG_INFO("utilization_watcher[5s]: Device %d (CUDA %d) - memory OK: usage=%.2f GB limit=%.2f GB", 
                                     dev_idx, cuda_dev, 
                                     usage / (1024.0 * 1024.0 * 1024.0),
                                     limit / (1024.0 * 1024.0 * 1024.0));
@@ -371,7 +372,7 @@ void* utilization_watcher() {
                     }
                 }
             }
-            LOG_DEBUG("utilization_watcher[5s]: Completed memory check cycle");
+            LOG_FILE_DEBUG("utilization_watcher[5s]: Completed memory check cycle");
         }
     }
 }

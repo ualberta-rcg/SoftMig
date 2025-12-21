@@ -95,6 +95,6 @@ CUresult cuFuncGetAttribute(int *pi, CUfunction_attribute attrib, CUfunction hfu
 }
 
 CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunction_attribute attrib, int value) {
-    LOG_DEBUG("cuFuncSetAttribute");
+    // Removed debug logging - cuFuncSetAttribute is called very frequently during kernel launches
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuFuncSetAttribute,hfunc,attrib,value);
 }

@@ -1584,59 +1584,53 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     *infoCount = 0;
     return ret;
   } else {
-    LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Successfully retrieved %u processes from NVML (buffer size %u)", 
+    LOG_FILE_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Successfully retrieved %u processes from NVML (buffer size %u)", 
              temp_count, SHARED_REGION_MAX_PROCESS_NUM);
   }
   
   // #region Detailed NVML struct logging - helps debug struct mismatches between CUDA headers and driver
   // Log detailed information about NVML process structs to detect layout mismatches
-  LOG_DEBUG("RAW_NVML_HOOK: Received %u processes from NVML, struct_size=%zu bytes", 
-           temp_count, sizeof(nvmlProcessInfo_t));
+  // FILE ONLY - don't spam console with verbose struct dumps
+  // Only log detailed struct info on errors or very infrequently to avoid log spam
+  // This verbose logging runs every 120ms via utilization_watcher, so we throttle it
+  static unsigned int struct_log_counter = 0;
+  static unsigned int struct_log_interval = 100;  // Log every 100 calls (~12 seconds at 120ms intervals)
   
-  for (unsigned int i = 0; i < temp_count && i < 10; i++) {  // Log first 10 processes
-    unsigned char *raw_bytes = (unsigned char *)&all_infos[i];
+  if (++struct_log_counter >= struct_log_interval) {
+    struct_log_counter = 0;
+    LOG_FILE_DEBUG("RAW_NVML_HOOK: Received %u processes from NVML, struct_size=%zu bytes", 
+             temp_count, sizeof(nvmlProcessInfo_t));
     
-    // Extract PID using safe method to detect mismatches
-    unsigned int safe_pid = extract_pid_safely((void *)&all_infos[i]);
-    
-    // Log struct fields as interpreted by headers
-    LOG_DEBUG("RAW_NVML_HOOK Process[%u]: struct fields - version=%u pid=%u (0x%x) memory=%llu (0x%llx)", 
-              i, all_infos[i].version, all_infos[i].pid, all_infos[i].pid,
-              (unsigned long long)all_infos[i].usedGpuMemory,
-              (unsigned long long)all_infos[i].usedGpuMemory);
-    
-    // Log safe PID extraction result
-    if (safe_pid != all_infos[i].pid && safe_pid != 0) {
-      LOG_WARN("RAW_NVML_HOOK Process[%u]: STRUCT MISMATCH DETECTED - header pid=%u, safe_pid=%u (offset mismatch)", 
-               i, all_infos[i].pid, safe_pid);
-    } else if (safe_pid == 0 && all_infos[i].pid > 0) {
-      LOG_WARN("RAW_NVML_HOOK Process[%u]: INVALID PID - header pid=%u could not be validated", 
-               i, all_infos[i].pid);
+    // Only log first process as sample
+    if (temp_count > 0) {
+      unsigned char *raw_bytes = (unsigned char *)&all_infos[0];
+      unsigned int safe_pid = extract_pid_safely((void *)&all_infos[0]);
+      
+      // Log struct fields as interpreted by headers
+      LOG_FILE_DEBUG("RAW_NVML_HOOK Process[0]: struct fields - version=%u pid=%u (0x%x) memory=%llu (0x%llx)", 
+                all_infos[0].version, all_infos[0].pid, all_infos[0].pid,
+                (unsigned long long)all_infos[0].usedGpuMemory,
+                (unsigned long long)all_infos[0].usedGpuMemory);
+      
+      // Log safe PID extraction result - always warn on mismatch (warnings go to console)
+      if (safe_pid != all_infos[0].pid && safe_pid != 0) {
+        LOG_WARN("RAW_NVML_HOOK Process[0]: STRUCT MISMATCH DETECTED - header pid=%u, safe_pid=%u (offset mismatch)", 
+                 all_infos[0].pid, safe_pid);
+      } else if (safe_pid == 0 && all_infos[0].pid > 0) {
+        LOG_WARN("RAW_NVML_HOOK Process[0]: INVALID PID - header pid=%u could not be validated", 
+                 all_infos[0].pid);
+      }
     }
-    
-    // Log raw hex dump of entire struct for detailed inspection
-    // This helps identify where fields actually are in the struct
-    char hex_dump[256] = {0};
-    char *hex_ptr = hex_dump;
-    size_t struct_size = sizeof(nvmlProcessInfo_t);
-    size_t dump_size = (struct_size < 24) ? struct_size : 24;  // Dump first 24 bytes
-    for (size_t j = 0; j < dump_size; j++) {
-      hex_ptr += sprintf(hex_ptr, "%02x ", raw_bytes[j]);
-    }
-    LOG_DEBUG("RAW_NVML_HOOK Process[%u] raw_bytes[0-%zu]: %s(struct_size=%zu)", 
-              i, dump_size - 1, hex_dump, struct_size);
-    
-    // Log all 4-byte aligned values in the struct to help identify field positions
-    if (i < 3) {  // Only for first 3 processes to avoid spam
-      LOG_DEBUG("RAW_NVML_HOOK Process[%u] struct field scan:", i);
-      for (size_t offset = 0; offset < struct_size && offset < 24; offset += sizeof(unsigned int)) {
-        unsigned int *value = (unsigned int *)(raw_bytes + offset);
-        if (*value > 1 && *value < 4000000) {  // Looks like a PID
-          LOG_DEBUG("  offset %zu: %u (0x%x) - possible PID", offset, *value, *value);
-        } else if (*value > 0 && *value < 3) {  // Looks like version
-          LOG_DEBUG("  offset %zu: %u - possible version", offset, *value);
-        } else if (*value > 0) {
-          LOG_DEBUG("  offset %zu: %u (0x%x)", offset, *value, *value);
+  } else {
+    // Still check for mismatches on every call, but only log warnings (not debug spam)
+    for (unsigned int i = 0; i < temp_count && i < 2; i++) {  // Check first 2 processes
+      unsigned int safe_pid = extract_pid_safely((void *)&all_infos[i]);
+      if (safe_pid != all_infos[i].pid && safe_pid != 0) {
+        // Only warn on actual mismatches - warnings go to console at level >= 1
+        static unsigned int mismatch_warn_counter = 0;
+        if (++mismatch_warn_counter % 100 == 0) {  // Throttle warnings too
+          LOG_WARN("RAW_NVML_HOOK Process[%u]: STRUCT MISMATCH - header pid=%u, safe_pid=%u", 
+                   i, all_infos[i].pid, safe_pid);
         }
       }
     }

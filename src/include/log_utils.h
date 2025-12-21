@@ -123,6 +123,36 @@ static inline int get_log_level(void) {
     return cached_level;
 }
 
+static inline void log_to_file_only(const char* prefix, const char* msg, ...) {
+    va_list args;
+    va_start(args, msg);
+    
+    // Extract filename from __FILE__ without using basename() to avoid thread-safety issues
+    const char* file_name = __FILE__;
+    const char* last_slash = strrchr(file_name, '/');
+    if (last_slash != NULL) {
+        file_name = last_slash + 1;
+    }
+    const char* last_backslash = strrchr(file_name, '\\');
+    if (last_backslash != NULL) {
+        file_name = last_backslash + 1;
+    }
+    
+    // Always log to file only (no console)
+    if (fp1 == NULL) {
+        char* log_path = get_log_file_path();
+        fp1 = fopen(log_path, "a");
+    }
+    if (fp1 != NULL) {
+        fprintf(fp1, "[softmig %s(%d:%ld:%s:%d)]: ", prefix, getpid(), (long)pthread_self(), file_name, __LINE__);
+        vfprintf(fp1, msg, args);
+        fprintf(fp1, "\n");
+        fflush(fp1);
+    }
+    
+    va_end(args);
+}
+
 static inline void log_to_file_and_console(const char* prefix, const char* msg, ...) {
     va_list args;
     va_start(args, msg);
@@ -140,7 +170,7 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
     
     // Check if console logging is needed BEFORE using va_list
     int log_level = get_log_level();
-    int need_console = (log_level >= 2);
+    int need_console = (log_level >= 3);  // Changed: console only for level >= 3 (info level)
     
     // Copy va_list BEFORE first use if console logging is needed
     va_list args_console;
@@ -160,7 +190,7 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
         fflush(fp1);
     }
     
-    // Console logging for debug mode (level >= 2)
+    // Console logging for info mode (level >= 3) - only useful messages
     if (need_console) {
         fprintf(stderr, "[softmig %s]: ", prefix);
         vfprintf(stderr, msg, args_console);
@@ -171,6 +201,15 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
     va_end(args);
 }
 
+// LOG_FILE_DEBUG: Log to file only (no console spam)
+#define LOG_FILE_DEBUG(msg, ...) { \
+    int log_level = get_log_level(); \
+    if (log_level >= 2) { \
+        log_to_file_only("Debug", msg, ##__VA_ARGS__); \
+    } \
+}
+
+// LOG_DEBUG: Log to file and console (for useful user-facing messages)
 #define LOG_DEBUG(msg, ...) { \
     int log_level = get_log_level(); \
     if (log_level >= 2) { \
