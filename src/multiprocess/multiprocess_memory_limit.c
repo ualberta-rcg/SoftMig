@@ -839,7 +839,16 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
         infos[j].version = nvmlProcessInfo_v2;
     }
     
-    ret = nvmlDeviceGetComputeRunningProcesses(ndev, &process_count, infos);
+    // Bypass hook to get ALL processes directly from NVML, then filter ourselves
+    // This ensures we see all processes, not just the ones the hook filtered
+    // The hook filters processes, but we need to see all processes to calculate accurate memory usage
+    if (nvml_library_entry != NULL) {
+        ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                                        ndev, &process_count, infos);
+    } else {
+        // Fallback if nvml_library_entry not available (shouldn't happen in normal operation)
+        ret = nvmlDeviceGetComputeRunningProcesses(ndev, &process_count, infos);
+    }
     
     if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
         LOG_WARN("get_summed_device_memory_usage_from_nvml: nvmlDeviceGetComputeRunningProcesses failed: %d (%s)", 
