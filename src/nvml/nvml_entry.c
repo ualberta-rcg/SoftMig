@@ -1604,29 +1604,24 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     
     // Search raw bytes for target PIDs - check if they appear anywhere in the structure
     unsigned char *raw_bytes = (unsigned char *)&all_infos[i];
-    int found_pid1 = 0, found_pid2 = 0;
     
     // Check all 4-byte aligned positions in the structure for the target PIDs
     for (size_t offset = 0; offset <= sizeof(nvmlProcessInfo_t) - sizeof(unsigned int); offset += sizeof(unsigned int)) {
       unsigned int *value = (unsigned int *)(raw_bytes + offset);
       if (*value == target_pid1) {
         LOG_INFO("RAW_NVML_HOOK Process[%u]: Found PID %u at byte offset %zu", i, target_pid1, offset);
-        found_pid1 = 1;
       }
       if (*value == target_pid2) {
         LOG_INFO("RAW_NVML_HOOK Process[%u]: Found PID %u at byte offset %zu", i, target_pid2, offset);
-        found_pid2 = 1;
       }
     }
     
     // Also check if memory field interpreted as different types contains the PID
     if (all_infos[i].usedGpuMemory == target_pid1) {
       LOG_INFO("RAW_NVML_HOOK Process[%u]: memory field equals target PID %u", i, target_pid1);
-      found_pid1 = 1;
     }
     if (all_infos[i].usedGpuMemory == target_pid2) {
       LOG_INFO("RAW_NVML_HOOK Process[%u]: memory field equals target PID %u", i, target_pid2);
-      found_pid2 = 1;
     }
     
     // Check if pid field matches (even if it looks corrupted)
@@ -1672,7 +1667,6 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
       if (cgroup_check == 1) {
         // Process belongs to current cgroup session - include it
         should_include = 1;
-        uid_t proc_uid = proc_get_uid(all_infos[i].pid);
       } else if (cgroup_check == -1) {
         // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
         uid_t proc_uid = proc_get_uid(all_infos[i].pid);

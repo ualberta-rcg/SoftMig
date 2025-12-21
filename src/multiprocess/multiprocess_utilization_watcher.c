@@ -14,6 +14,8 @@
 
 #include <cuda.h>
 #include "include/nvml_prefix.h"
+// Include nvml-subset.h before system nvml.h to get our versioned struct definitions
+#include "include/nvml-subset.h"
 #include <nvml.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -136,7 +138,9 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
 
     int i;
     unsigned int infcount;
-    nvmlProcessInfo_v1_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    // Use nvmlProcessInfo_t (which has version field) instead of nvmlProcessInfo_v1_t
+    // to ensure compatibility with driver NVML struct layout
+    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
 
     unsigned int nvmlCounts;
     CHECK_NVML_API(nvmlDeviceGetCount(&nvmlCounts));

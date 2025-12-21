@@ -871,7 +871,6 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     
     // Get current user's UID for fallback filtering
     uid_t current_uid = getuid();
-    pid_t current_pid = getpid();
     
     // Sum up memory from all processes belonging to current SLURM job (or current user if not in SLURM)
     for (unsigned int i = 0; i < process_count; i++) {
