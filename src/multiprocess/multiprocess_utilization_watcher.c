@@ -22,6 +22,7 @@
 #include "multiprocess/multiprocess_utilization_watcher.h"
 #include "include/log_utils.h"
 #include "include/nvml_override.h"
+#include "multiprocess/config_file.h"
 
 
 static int g_sm_num;
@@ -203,6 +204,11 @@ void* utilization_watcher() {
     int upper_limit = get_current_device_sm_limit(0);
     ensure_initialized();
     LOG_DEBUG("upper_limit=%d\n",upper_limit);
+    
+    // Memory monitoring: run every ~5 seconds (42 iterations of 120ms = 5.04 seconds)
+    unsigned int memory_check_counter = 0;
+    const unsigned int MEMORY_CHECK_INTERVAL = 42;  // ~5 seconds
+    
     while (1){
         nanosleep(&g_wait, NULL);
         if (pidfound==0) {
@@ -231,6 +237,89 @@ void* utilization_watcher() {
           change_token(share);
         }
         LOG_INFO("userutil1=%d currentcores=%ld total=%ld limit=%d share=%ld\n",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
+        
+        // Memory monitoring: check every ~5 seconds
+        memory_check_counter++;
+        if (memory_check_counter >= MEMORY_CHECK_INTERVAL) {
+            memory_check_counter = 0;
+            
+            // Only check memory if softmig is enabled and memory limits are configured
+            // Check if CUDA_DEVICE_MEMORY_LIMIT is set (similar to how SM limit is checked)
+            extern int is_softmig_configured(void);
+            if (is_softmig_configured()) {
+                // Get number of devices
+                unsigned int nvml_devices_count;
+                nvmlReturn_t ret = nvmlDeviceGetCount_v2(&nvml_devices_count);
+                if (ret == NVML_SUCCESS) {
+                    // Check all devices for memory OOM
+                    for (unsigned int dev_idx = 0; dev_idx < nvml_devices_count; dev_idx++) {
+                        // Map NVML device index to CUDA device index
+                        int cuda_dev = -1;
+                        for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
+                            if (cuda_to_nvml_map(i) == dev_idx) {
+                                cuda_dev = i;
+                                break;
+                            }
+                        }
+                        
+                        if (cuda_dev < 0) {
+                            continue;  // Skip if device mapping not found
+                        }
+                        
+                        // Get memory limit for this device
+                        uint64_t limit = get_current_device_memory_limit(cuda_dev);
+                        if (limit == 0) {
+                            continue;  // No limit set for this device, skip
+                        }
+                        
+                        // Get current memory usage (summed from NVML, filtered by cgroup/UID)
+                        uint64_t usage = get_summed_device_memory_usage_from_nvml(cuda_dev);
+                        if (usage == 0) {
+                            // Fallback to tracked usage if NVML query failed
+                            lock_shrreg();
+                            usage = get_gpu_memory_usage_nolock(cuda_dev);
+                            unlock_shrreg();
+                        }
+                        
+                        LOG_DEBUG("memory_watcher: Device %d (CUDA %d) - usage=%llu limit=%llu", 
+                                 dev_idx, cuda_dev, (unsigned long long)usage, (unsigned long long)limit);
+                        
+                        // Check if over limit
+                        if (usage > limit) {
+                            LOG_ERROR("memory_watcher: OOM detected on device %d (CUDA %d) - usage %llu exceeds limit %llu", 
+                                     dev_idx, cuda_dev, (unsigned long long)usage, (unsigned long long)limit);
+                            
+                            // Get job ID for syslog
+                            char* job_id = getenv("SLURM_JOB_ID");
+                            
+                            // Log to syslog
+                            char syslog_msg[512];
+                            if (job_id != NULL) {
+                                snprintf(syslog_msg, sizeof(syslog_msg), 
+                                         "Job %s: GPU Memory OOM on device %d - usage %llu bytes (%.2f GB) exceeds limit %llu bytes (%.2f GB)",
+                                         job_id, cuda_dev,
+                                         (unsigned long long)usage, usage / (1024.0 * 1024.0 * 1024.0),
+                                         (unsigned long long)limit, limit / (1024.0 * 1024.0 * 1024.0));
+                            } else {
+                                snprintf(syslog_msg, sizeof(syslog_msg), 
+                                         "GPU Memory OOM on device %d - usage %llu bytes (%.2f GB) exceeds limit %llu bytes (%.2f GB)",
+                                         cuda_dev,
+                                         (unsigned long long)usage, usage / (1024.0 * 1024.0 * 1024.0),
+                                         (unsigned long long)limit, limit / (1024.0 * 1024.0 * 1024.0));
+                            }
+                            
+                            char cmd[1024];
+                            snprintf(cmd, sizeof(cmd), "logger -t softmig '%s'", syslog_msg);
+                            system(cmd);
+                            LOG_ERROR("OOM syslog: %s", syslog_msg);
+                            
+                            // Trigger gradual OOM killer
+                            gradual_oom_killer(cuda_dev);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

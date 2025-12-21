@@ -153,6 +153,7 @@ int rm_gpu_device_memory_usage(int32_t pid,int dev,size_t usage,int type);
 
 shrreg_proc_slot_t *find_proc_by_hostpid(int hostpid);
 int active_oom_killer();
+int gradual_oom_killer(int cuda_dev);
 void pre_launch_kernel();
 
 int shrreg_major_version();

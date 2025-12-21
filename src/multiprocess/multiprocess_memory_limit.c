@@ -407,6 +407,242 @@ int active_oom_killer() {
     return total_killed;
 }
 
+// Structure to hold process info for sorting
+typedef struct {
+    uint32_t pid;
+    uint64_t memory;
+} process_memory_info_t;
+
+// Comparison function for qsort - sort by memory descending (highest first)
+static int compare_process_memory(const void* a, const void* b) {
+    const process_memory_info_t* pa = (const process_memory_info_t*)a;
+    const process_memory_info_t* pb = (const process_memory_info_t*)b;
+    
+    if (pa->memory > pb->memory) return -1;
+    if (pa->memory < pb->memory) return 1;
+    return 0;
+}
+
+// Kill all processes in current cgroup (terminates SLURM job)
+static int kill_current_cgroup(void) {
+    char* cgroup_path = proc_get_cgroup_path(getpid());
+    if (cgroup_path == NULL) {
+        LOG_WARN("kill_current_cgroup: Could not determine cgroup path");
+        return -1;
+    }
+    
+    LOG_ERROR("kill_current_cgroup: Killing all processes in cgroup: %s", cgroup_path);
+    
+    // Try cgroups v2 first: /sys/fs/cgroup/<path>/cgroup.procs
+    char cgroup_procs_file[2048];
+    snprintf(cgroup_procs_file, sizeof(cgroup_procs_file), 
+             "/sys/fs/cgroup/%s/cgroup.procs", cgroup_path);
+    
+    FILE* fp = fopen(cgroup_procs_file, "r");
+    if (fp != NULL) {
+        pid_t pid;
+        int killed = 0;
+        while (fscanf(fp, "%d", &pid) == 1) {
+            if (pid > 0 && pid != getpid()) {  // Don't kill ourselves
+                LOG_ERROR("kill_current_cgroup: Killing PID %d from cgroup", pid);
+                kill(pid, SIGKILL);
+                killed++;
+            }
+        }
+        fclose(fp);
+        free(cgroup_path);
+        LOG_ERROR("kill_current_cgroup: Killed %d processes from cgroup v2", killed);
+        return killed;
+    }
+    
+    // Try cgroups v1: /sys/fs/cgroup/memory/<path>/cgroup.procs
+    snprintf(cgroup_procs_file, sizeof(cgroup_procs_file), 
+             "/sys/fs/cgroup/memory/%s/cgroup.procs", cgroup_path);
+    
+    fp = fopen(cgroup_procs_file, "r");
+    if (fp != NULL) {
+        pid_t pid;
+        int killed = 0;
+        while (fscanf(fp, "%d", &pid) == 1) {
+            if (pid > 0 && pid != getpid()) {  // Don't kill ourselves
+                LOG_ERROR("kill_current_cgroup: Killing PID %d from cgroup", pid);
+                kill(pid, SIGKILL);
+                killed++;
+            }
+        }
+        fclose(fp);
+        free(cgroup_path);
+        LOG_ERROR("kill_current_cgroup: Killed %d processes from cgroup v1", killed);
+        return killed;
+    }
+    
+    free(cgroup_path);
+    LOG_WARN("kill_current_cgroup: Could not find cgroup.procs file (tried v2 and v1)");
+    return -1;
+}
+
+// Send syslog message for OOM event
+static void log_oom_to_syslog(const char* job_id, int device, uint64_t usage, uint64_t limit) {
+    char syslog_msg[512];
+    if (job_id != NULL) {
+        snprintf(syslog_msg, sizeof(syslog_msg), 
+                 "Job %s: GPU Memory OOM on device %d - usage %llu bytes (%.2f GB) exceeds limit %llu bytes (%.2f GB)",
+                 job_id, device,
+                 (unsigned long long)usage, usage / (1024.0 * 1024.0 * 1024.0),
+                 (unsigned long long)limit, limit / (1024.0 * 1024.0 * 1024.0));
+    } else {
+        snprintf(syslog_msg, sizeof(syslog_msg), 
+                 "GPU Memory OOM on device %d - usage %llu bytes (%.2f GB) exceeds limit %llu bytes (%.2f GB)",
+                 device,
+                 (unsigned long long)usage, usage / (1024.0 * 1024.0 * 1024.0),
+                 (unsigned long long)limit, limit / (1024.0 * 1024.0 * 1024.0));
+    }
+    
+    // Use system logger command
+    char cmd[1024];
+    snprintf(cmd, sizeof(cmd), "logger -t softmig '%s'", syslog_msg);
+    system(cmd);
+    
+    LOG_ERROR("OOM syslog: %s", syslog_msg);
+}
+
+// Gradual OOM killer: kills processes one by one, sorted by GPU memory (highest first)
+// Returns number of processes killed, or -1 on error
+int gradual_oom_killer(int cuda_dev) {
+    if (!is_softmig_enabled() || region_info.shared_region == NULL) {
+        return 0;  // No-op when softmig is disabled
+    }
+    
+    uid_t current_uid = getuid();
+    if (current_uid == 0) {
+        LOG_INFO("gradual_oom_killer: Root user (UID 0) - OOM killer disabled");
+        return 0;
+    }
+    
+    unsigned int nvml_dev_idx = cuda_to_nvml_map(cuda_dev);
+    nvmlDevice_t device;
+    nvmlReturn_t ret = nvmlDeviceGetHandleByIndex(nvml_dev_idx, &device);
+    if (ret != NVML_SUCCESS) {
+        LOG_WARN("gradual_oom_killer: Failed to get device handle for CUDA device %d (NVML %u): %d (%s)", 
+                 cuda_dev, nvml_dev_idx, ret, nvmlErrorString(ret));
+        return -1;
+    }
+    
+    // Get all processes on this device
+    unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
+    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    
+    if (nvml_library_entry != NULL) {
+        ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
+                                        device, &process_count, infos);
+    } else {
+        ret = nvmlDeviceGetComputeRunningProcesses(device, &process_count, infos);
+    }
+    
+    if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+        LOG_WARN("gradual_oom_killer: Failed to get processes for device %d: %d (%s)", 
+                 cuda_dev, ret, nvmlErrorString(ret));
+        return -1;
+    }
+    
+    // Filter processes belonging to current cgroup/UID and collect them
+    process_memory_info_t filtered_processes[SHARED_REGION_MAX_PROCESS_NUM];
+    unsigned int filtered_count = 0;
+    
+    for (unsigned int i = 0; i < process_count; i++) {
+        int should_kill = 0;
+        int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+        
+        if (cgroup_check == 1) {
+            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+                should_kill = 1;
+            }
+        } else if (cgroup_check == -1) {
+            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+                should_kill = 1;
+            }
+        }
+        
+        if (should_kill && proc_alive(infos[i].pid) == PROC_STATE_ALIVE) {
+            filtered_processes[filtered_count].pid = infos[i].pid;
+            filtered_processes[filtered_count].memory = infos[i].usedGpuMemory;
+            filtered_count++;
+        }
+    }
+    
+    if (filtered_count == 0) {
+        LOG_INFO("gradual_oom_killer: No processes found to kill on device %d", cuda_dev);
+        return 0;
+    }
+    
+    // Sort processes by memory (highest first)
+    qsort(filtered_processes, filtered_count, sizeof(process_memory_info_t), compare_process_memory);
+    
+    LOG_ERROR("gradual_oom_killer: Found %u processes on device %d, sorted by memory (highest first)", 
+              filtered_count, cuda_dev);
+    
+    uint64_t limit = get_current_device_memory_limit(cuda_dev);
+    int killed = 0;
+    time_t start_time = time(NULL);
+    const int MAX_OOM_DURATION = 30;  // Kill cgroup if over limit for 30 seconds
+    
+    // Kill processes one by one until under limit or only one remains
+    for (unsigned int i = 0; i < filtered_count; i++) {
+        // Check if we've been over limit for too long
+        time_t current_time = time(NULL);
+        if (current_time - start_time > MAX_OOM_DURATION) {
+            LOG_ERROR("gradual_oom_killer: Over limit for %ld seconds, killing entire cgroup", 
+                     current_time - start_time);
+            kill_current_cgroup();
+            return killed;
+        }
+        
+        // If only one process left and still over limit, kill cgroup
+        if (i == filtered_count - 1) {
+            LOG_ERROR("gradual_oom_killer: Only one process remaining (PID %u) and still over limit, killing cgroup", 
+                     filtered_processes[i].pid);
+            kill_current_cgroup();
+            return killed;
+        }
+        
+        // Kill the process with highest memory
+        LOG_ERROR("gradual_oom_killer: Killing PID %u (memory %llu bytes, device %d)", 
+                 filtered_processes[i].pid, 
+                 (unsigned long long)filtered_processes[i].memory, 
+                 cuda_dev);
+        
+        int kill_result = kill(filtered_processes[i].pid, SIGKILL);
+        if (kill_result == 0) {
+            killed++;
+            LOG_ERROR("gradual_oom_killer: Successfully killed PID %u", filtered_processes[i].pid);
+        } else {
+            LOG_WARN("gradual_oom_killer: Failed to kill PID %u: errno=%d (%s)", 
+                    filtered_processes[i].pid, errno, strerror(errno));
+        }
+        
+        // Wait for process to terminate and memory to be freed
+        usleep(500000);  // 500ms
+        
+        // Re-check memory usage
+        uint64_t usage = get_summed_device_memory_usage_from_nvml(cuda_dev);
+        if (usage == 0) {
+            usage = get_gpu_memory_usage_nolock(cuda_dev);
+        }
+        
+        LOG_INFO("gradual_oom_killer: After killing PID %u, usage=%llu limit=%llu", 
+                 filtered_processes[i].pid, (unsigned long long)usage, (unsigned long long)limit);
+        
+        if (usage <= limit) {
+            LOG_INFO("gradual_oom_killer: Memory usage now under limit, stopping");
+            break;
+        }
+    }
+    
+    return killed;
+}
+
 void pre_launch_kernel() {
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return;  // No-op when softmig is disabled
