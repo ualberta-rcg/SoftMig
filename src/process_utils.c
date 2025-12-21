@@ -439,7 +439,48 @@ uint64_t extract_memory_safely(void *proc, unsigned int actual_pid, unsigned int
         }
     }
     
-    // Fallback: try standard field anyway (might work in some cases)
-    return info->usedGpuMemory;
+    // Final fallback: scan ALL 8-byte aligned offsets (0, 8, 16, 24) more thoroughly
+    // This catches edge cases where memory might be at unexpected locations
+    for (int offset = 0; offset <= 24; offset += 8) {
+        // Skip if this overlaps with PID
+        int pid_end = pid_offset + 4;
+        if ((offset <= pid_offset && pid_offset < offset + 8) ||
+            (offset < pid_end && pid_end <= offset + 8)) {
+            continue;
+        }
+        
+        // Skip if we already tried this offset above
+        int already_tried = 0;
+        for (int j = 0; j < num_safe_offsets; j++) {
+            if (safe_offsets[j] == offset) {
+                already_tried = 1;
+                break;
+            }
+        }
+        if (already_tried) continue;
+        
+        uint64_t candidate = *(uint64_t*)(raw + offset);
+        if (candidate > 1048576 && candidate < 107374182400ULL) {
+            if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
+                uint32_t low_bits = (uint32_t)(candidate & 0xFFFFFFFFULL);
+                uint32_t high_bits = (uint32_t)((candidate >> 32) & 0xFFFFFFFFULL);
+                if (low_bits != actual_pid && high_bits != actual_pid && 
+                    low_bits != header_pid && high_bits != header_pid) {
+                    return candidate;
+                }
+            }
+        }
+    }
+    
+    // Last resort: try standard field anyway (might work in some cases)
+    // But validate it's not the PID
+    uint64_t fallback = info->usedGpuMemory;
+    if (fallback > 1048576 && fallback < 107374182400ULL &&
+        fallback != (uint64_t)actual_pid && fallback != (uint64_t)header_pid) {
+        return fallback;
+    }
+    
+    // If standard field also looks wrong, return 0 to trigger MIN_PROCESS_MEMORY fallback
+    return 0;
 }
 

@@ -443,6 +443,17 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
         // Extract memory value safely - handles struct mismatches where PID is at wrong offset
         uint64_t process_mem = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
         
+        // Validate that extracted memory is reasonable (not the PID value)
+        // If process_mem equals the PID, it's likely wrong (we read PID instead of memory)
+        if (process_mem > 0 && (process_mem == (uint64_t)actual_pid || process_mem == (uint64_t)infos[i].pid)) {
+            // We extracted the PID instead of memory - try using header value if reasonable
+            if (infos[i].usedGpuMemory > 1048576 && infos[i].usedGpuMemory < 107374182400ULL) {
+                process_mem = infos[i].usedGpuMemory;
+            } else {
+                process_mem = 0;  // Will trigger MIN_PROCESS_MEMORY fallback
+            }
+        }
+        
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (process_mem != NVML_VALUE_NOT_AVAILABLE_ULL && process_mem > 0) {
             // Add 5% overhead, then ensure minimum

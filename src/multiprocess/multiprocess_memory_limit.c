@@ -919,18 +919,45 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
         // Extract memory value safely - handles struct mismatches where PID is at wrong offset
         uint64_t process_mem = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
         
+        // Log what we extracted vs what header says (for debugging)
+        LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - extracted_memory=%llu header_memory=%llu", 
+                     i, actual_pid, (unsigned long long)process_mem, (unsigned long long)infos[i].usedGpuMemory);
+        
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (process_mem != NVML_VALUE_NOT_AVAILABLE_ULL && process_mem > 0) {
-            // Add 5% overhead, then ensure minimum
-            uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
-            uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
-            total_usage += process_mem_counted;
-            included_count++;
-            LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - INCLUDED: memory=%llu bytes (%.2f GB), total_usage now=%llu bytes (%.2f GB)", 
-                         i, actual_pid, (unsigned long long)process_mem, 
-                         process_mem / (1024.0 * 1024.0 * 1024.0),
-                         (unsigned long long)total_usage,
-                         total_usage / (1024.0 * 1024.0 * 1024.0));
+            // Validate that extracted memory is reasonable (not the PID value)
+            // If process_mem equals the PID, it's likely wrong (we read PID instead of memory)
+            if (process_mem == (uint64_t)actual_pid || process_mem == (uint64_t)infos[i].pid) {
+                // We extracted the PID instead of memory - this is wrong
+                LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - extracted memory equals PID (%llu), using header value %llu instead", 
+                         i, actual_pid, (unsigned long long)process_mem, (unsigned long long)infos[i].usedGpuMemory);
+                // Try using header value if it's reasonable
+                if (infos[i].usedGpuMemory > 1048576 && infos[i].usedGpuMemory < 107374182400ULL) {
+                    process_mem = infos[i].usedGpuMemory;
+                } else {
+                    // Header value also looks wrong - use minimum
+                    process_mem = 0;  // Will trigger MIN_PROCESS_MEMORY fallback
+                }
+            }
+            
+            if (process_mem > 0) {
+                // Add 5% overhead, then ensure minimum
+                uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
+                uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
+                total_usage += process_mem_counted;
+                included_count++;
+                LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - INCLUDED: memory=%llu bytes (%.2f GB), total_usage now=%llu bytes (%.2f GB)", 
+                             i, actual_pid, (unsigned long long)process_mem, 
+                             process_mem / (1024.0 * 1024.0 * 1024.0),
+                             (unsigned long long)total_usage,
+                             total_usage / (1024.0 * 1024.0 * 1024.0));
+            } else {
+                // Extracted value was invalid (was PID) - use minimum
+                total_usage += MIN_PROCESS_MEMORY;
+                included_count++;
+                LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - extracted memory invalid, using minimum (9MB). Header value was %llu", 
+                         i, actual_pid, (unsigned long long)infos[i].usedGpuMemory);
+            }
         } else {
             // Even if NVML reports 0 or unavailable, count minimum for the process
             total_usage += MIN_PROCESS_MEMORY;
