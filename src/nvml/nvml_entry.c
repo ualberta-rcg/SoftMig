@@ -1629,6 +1629,21 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
         // Log all mismatches to file (for debugging), but throttle console warnings
         LOG_FILE_DEBUG("RAW_NVML_HOOK Process[%u]: STRUCT MISMATCH - header pid=%u, safe_pid=%u", 
                      i, all_infos[i].pid, safe_pid);
+        
+        // Add raw bytes dump when mismatch detected (throttled to avoid spam)
+        static unsigned int raw_bytes_log_counter = 0;
+        if (++raw_bytes_log_counter % 50 == 0) {  // Log every 50th mismatch
+          unsigned char *raw = (unsigned char *)&all_infos[i];
+          LOG_FILE_DEBUG("RAW_NVML_HOOK Process[%u] PID %u raw_bytes[0-23]: "
+                        "%02x %02x %02x %02x %02x %02x %02x %02x "
+                        "%02x %02x %02x %02x %02x %02x %02x %02x "
+                        "%02x %02x %02x %02x %02x %02x %02x %02x",
+                        i, safe_pid,
+                        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                        raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
+                        raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23]);
+        }
+        
         // Only warn on console occasionally to avoid spam
         static unsigned int mismatch_warn_counter = 0;
         if (++mismatch_warn_counter % 100 == 0) {  // Throttle console warnings

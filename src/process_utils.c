@@ -334,21 +334,107 @@ uint64_t extract_memory_safely(void *proc, unsigned int actual_pid, unsigned int
     }
     
     // Struct mismatch detected - PID is at wrong offset, so memory is probably at wrong offset too
-    // Standard layout: offset 0=version, 4=pid, 8=usedGpuMemory
-    // When PID is at offset 0: memory might be at 4, 8, or 12
-    // When PID is at offset 8: memory might be at 12, 16, or 20
-    // Memory values are typically > 1MB (1048576 bytes) and < 100GB (107374182400 bytes)
+    // First, find where the PID actually is in the struct
+    int pid_offset = -1;
+    for (int offset = 0; offset <= 12; offset += 4) {
+        unsigned int candidate = *(unsigned int*)(raw + offset);
+        if (candidate == actual_pid) {
+            pid_offset = offset;
+            break;
+        }
+    }
     
-    // Try common offsets for memory (8, 12, 16, 20 bytes from start)
-    for (int offset = 8; offset <= 20; offset += 4) {
-        uint64_t candidate = *(uint64_t*)(raw + offset);
-        // Memory values are typically > 1MB and reasonable (< 100GB per process)
+    // Add detailed logging to help debug struct layout issues (throttled to avoid spam)
+    static unsigned int memory_log_counter = 0;
+    if (++memory_log_counter % 100 == 0) {  // Log every 100th call
+        LOG_FILE_DEBUG("extract_memory_safely: PID %u (header %u) at offset %d, raw_bytes[0-23]: "
+                      "%02x %02x %02x %02x %02x %02x %02x %02x "
+                      "%02x %02x %02x %02x %02x %02x %02x %02x "
+                      "%02x %02x %02x %02x %02x %02x %02x %02x",
+                      actual_pid, header_pid, pid_offset,
+                      raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
+                      raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
+                      raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23]);
+    }
+    
+    // If we couldn't find the PID offset, fall back to scanning without overlap detection
+    if (pid_offset == -1) {
+        // PID not found at expected offsets - try scanning for memory anyway
+        for (int offset = 8; offset <= 20; offset += 4) {
+            uint64_t candidate = *(uint64_t*)(raw + offset);
+            if (candidate > 1048576 && candidate < 107374182400ULL) {
+                if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
+                    // Also check if either half of the 64-bit value matches PID
+                    uint32_t low_bits = (uint32_t)(candidate & 0xFFFFFFFFULL);
+                    uint32_t high_bits = (uint32_t)((candidate >> 32) & 0xFFFFFFFFULL);
+                    if (low_bits != actual_pid && high_bits != actual_pid && 
+                        low_bits != header_pid && high_bits != header_pid) {
+                        return candidate;
+                    }
+                }
+            }
+        }
+        return info->usedGpuMemory;  // Fallback
+    }
+    
+    // Now we know where the PID is - read memory from offsets that don't overlap with it
+    // Memory is 8 bytes, PID is 4 bytes
+    // We need to avoid reading 8-byte values that include the PID
+    
+    // Try 8-byte aligned offsets that don't overlap with PID
+    // Common safe offsets: 0, 8, 16 (8-byte aligned for 64-bit reads)
+    int safe_offsets[] = {0, 8, 16};
+    int num_safe_offsets = 3;
+    
+    for (int i = 0; i < num_safe_offsets; i++) {
+        int mem_offset = safe_offsets[i];
+        
+        // Check if this 8-byte read would overlap with PID
+        // Overlap if: mem_offset <= pid_offset < mem_offset+8 OR mem_offset < pid_offset+4 <= mem_offset+8
+        int pid_end = pid_offset + 4;  // PID occupies 4 bytes
+        if ((mem_offset <= pid_offset && pid_offset < mem_offset + 8) ||
+            (mem_offset < pid_end && pid_end <= mem_offset + 8)) {
+            // This offset overlaps with PID - skip it
+            continue;
+        }
+        
+        // This offset is safe - try reading memory from here
+        uint64_t candidate = *(uint64_t*)(raw + mem_offset);
+        
+        // Validate memory value (typically > 1MB and < 100GB)
         if (candidate > 1048576 && candidate < 107374182400ULL) {
-            // Additional validation: if PID is at offset 8, memory should be after it
-            // If PID is at offset 0, memory could be at 4, 8, or 12
-            // Skip if candidate equals the PID (we're reading PID instead of memory)
+            // Additional validation: make sure it's not the PID
             if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
-                return candidate;
+                // Also check if either half of the 64-bit value matches PID
+                uint32_t low_bits = (uint32_t)(candidate & 0xFFFFFFFFULL);
+                uint32_t high_bits = (uint32_t)((candidate >> 32) & 0xFFFFFFFFULL);
+                if (low_bits != actual_pid && high_bits != actual_pid && 
+                    low_bits != header_pid && high_bits != header_pid) {
+                    return candidate;
+                }
+            }
+        }
+    }
+    
+    // Also try offset 12, 20 (4-byte aligned but might contain memory)
+    // Only if they don't overlap with PID
+    for (int offset = 12; offset <= 20; offset += 8) {
+        // Check if this 8-byte read would overlap with PID
+        int pid_end = pid_offset + 4;
+        if ((offset <= pid_offset && pid_offset < offset + 8) ||
+            (offset < pid_end && pid_end <= offset + 8)) {
+            continue;  // Skip overlapping offsets
+        }
+        
+        uint64_t candidate = *(uint64_t*)(raw + offset);
+        if (candidate > 1048576 && candidate < 107374182400ULL) {
+            if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
+                uint32_t low_bits = (uint32_t)(candidate & 0xFFFFFFFFULL);
+                uint32_t high_bits = (uint32_t)((candidate >> 32) & 0xFFFFFFFFULL);
+                if (low_bits != actual_pid && high_bits != actual_pid && 
+                    low_bits != header_pid && high_bits != header_pid) {
+                    return candidate;
+                }
             }
         }
     }
