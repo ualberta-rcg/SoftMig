@@ -327,82 +327,89 @@ int active_oom_killer() {
         // Only non-root users get this treatment (root is disabled above)
         // In multi-user SLURM environment: filter by cgroup first (job isolation), then UID (user isolation)
         for (unsigned int i = 0; i < process_count; i++) {
+            // CRITICAL: Use safe PID extraction to handle struct mismatches
+            unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
+            if (actual_pid == 0) {
+                LOG_WARN("active_oom_killer: Process[%u] - could not extract valid PID, skipping", i);
+                continue;  // Skip if we can't get a valid PID
+            }
+            
             int should_kill = 0;
             
             // Log all process information from NVML
             LOG_INFO("active_oom_killer: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx)", 
-                     i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory, 
+                     i, actual_pid, (unsigned long long)infos[i].usedGpuMemory, 
                      (unsigned long long)infos[i].usedGpuMemory);
             
             // Filter by cgroup session first, fall back to UID (same logic as memory counting)
-            int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+            int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
             
             LOG_INFO("active_oom_killer: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
-                     i, infos[i].pid, cgroup_check);
+                     i, actual_pid, cgroup_check);
             
             if (cgroup_check == 1) {
                 // Process belongs to current cgroup session - verify UID for extra safety
                 // In SLURM, same cgroup should mean same job/user, but verify to be safe
-                uid_t proc_uid = proc_get_uid(infos[i].pid);
+                uid_t proc_uid = proc_get_uid(actual_pid);
                 
                 LOG_INFO("active_oom_killer: Process[%u] PID %u - same cgroup, checking UID: proc_uid=%u current_uid=%u", 
-                         i, infos[i].pid, proc_uid, current_uid);
+                         i, actual_pid, proc_uid, current_uid);
                 
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                     should_kill = 1;
                     LOG_ERROR("active_oom_killer: Process[%u] PID %u - WILL KILL (same cgroup session, UID %u matches, memory %llu bytes)", 
-                            i, infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
+                            i, actual_pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
                 } else {
                     // Same cgroup but different UID - this shouldn't happen in SLURM, but skip to be safe
                     LOG_WARN("active_oom_killer: Process[%u] PID %u - SKIPPING (same cgroup but different UID %u != current UID %u, memory %llu bytes)", 
-                             i, infos[i].pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
+                             i, actual_pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
                 }
             } else if (cgroup_check == -1) {
                 // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
-                uid_t proc_uid = proc_get_uid(infos[i].pid);
+                uid_t proc_uid = proc_get_uid(actual_pid);
                 
                 LOG_INFO("active_oom_killer: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
-                         i, infos[i].pid, proc_uid, current_uid);
+                         i, actual_pid, proc_uid, current_uid);
                 
                 if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                     should_kill = 1;
                     LOG_ERROR("active_oom_killer: Process[%u] PID %u - WILL KILL (same UID %u, cgroup unavailable, memory %llu bytes)", 
-                            i, infos[i].pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
+                            i, actual_pid, proc_uid, (unsigned long long)infos[i].usedGpuMemory);
                 } else {
                     LOG_INFO("active_oom_killer: Process[%u] PID %u - SKIPPING (UID %u != current UID %u, memory %llu bytes)", 
-                             i, infos[i].pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
+                             i, actual_pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
                 }
             } else {
                 // cgroup_check == 0 means different cgroup session - skip it
-                uid_t proc_uid = proc_get_uid(infos[i].pid);
+                uid_t proc_uid = proc_get_uid(actual_pid);
                 LOG_INFO("active_oom_killer: Process[%u] PID %u - SKIPPING (different cgroup session, proc_uid=%u current_uid=%u, memory %llu bytes)", 
-                         i, infos[i].pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
+                         i, actual_pid, proc_uid, current_uid, (unsigned long long)infos[i].usedGpuMemory);
             }
             
             if (should_kill) {
                 // Verify process is still alive before killing
-                int proc_state = proc_alive(infos[i].pid);
+                int proc_state = proc_alive(actual_pid);
                 LOG_INFO("active_oom_killer: Process[%u] PID %u - should_kill=1, proc_alive check: state=%d (0=alive, 1=dead, 2=unknown)", 
-                         i, infos[i].pid, proc_state);
+                         i, actual_pid, proc_state);
                 
                 if (proc_state == PROC_STATE_ALIVE) {
                     LOG_ERROR("active_oom_killer: Process[%u] PID %u - KILLING (device %u, memory %llu bytes)", 
-                             i, infos[i].pid, dev_idx, (unsigned long long)infos[i].usedGpuMemory);
-                    int kill_result = kill(infos[i].pid, SIGKILL);
+                             i, actual_pid, dev_idx, (unsigned long long)infos[i].usedGpuMemory);
+                    int kill_result = kill(actual_pid, SIGKILL);
                     if (kill_result == 0) {
                         total_killed++;
                         LOG_ERROR("active_oom_killer: Process[%u] PID %u - KILLED successfully (total_killed=%d)", 
-                                 i, infos[i].pid, total_killed);
+                                 i, actual_pid, total_killed);
                     } else {
                         LOG_WARN("active_oom_killer: Process[%u] PID %u - FAILED to kill: errno=%d (%s)", 
-                                i, infos[i].pid, errno, strerror(errno));
+                                i, actual_pid, errno, strerror(errno));
                     }
                 } else {
                     LOG_INFO("active_oom_killer: Process[%u] PID %u - already dead (state=%d), skipping kill", 
-                             i, infos[i].pid, proc_state);
+                             i, actual_pid, proc_state);
                 }
             } else {
-                LOG_INFO("active_oom_killer: Process[%u] PID %u - should_kill=0, NOT killing", i, infos[i].pid);
+                LOG_INFO("active_oom_killer: Process[%u] PID %u - should_kill=0, NOT killing", i, actual_pid);
             }
         }
     }
@@ -606,13 +613,19 @@ int gradual_oom_killer(int cuda_dev) {
         return -1;
     }
     
-    // #region agent log - Log RAW NVML response from gradual_oom_killer (bypasses hook)
-    for (unsigned int i = 0; i < process_count && i < 20; i++) {
-        LOG_DEBUG("RAW_NVML_BYPASS Process[%u]: pid=%u (0x%x) memory=%llu (0x%llx) struct_size=%zu", 
-                  i, infos[i].pid, infos[i].pid,
-                  (unsigned long long)infos[i].usedGpuMemory,
+    // #region Detailed NVML struct logging - helps debug struct mismatches
+    LOG_DEBUG("RAW_NVML_BYPASS: Received %u processes from NVML (gradual_oom_killer), struct_size=%zu bytes", 
+              process_count, sizeof(nvmlProcessInfo_t));
+    for (unsigned int i = 0; i < process_count && i < 10; i++) {
+        unsigned int safe_pid = extract_pid_safely((void *)&infos[i]);
+        LOG_DEBUG("RAW_NVML_BYPASS Process[%u]: version=%u header_pid=%u safe_pid=%u memory=%llu struct_size=%zu", 
+                  i, infos[i].version, infos[i].pid, safe_pid,
                   (unsigned long long)infos[i].usedGpuMemory,
                   sizeof(nvmlProcessInfo_t));
+        if (safe_pid != infos[i].pid && safe_pid != 0) {
+            LOG_WARN("RAW_NVML_BYPASS Process[%u]: STRUCT MISMATCH - header_pid=%u, safe_pid=%u", 
+                     i, infos[i].pid, safe_pid);
+        }
     }
     // #endregion
     
@@ -621,23 +634,29 @@ int gradual_oom_killer(int cuda_dev) {
     unsigned int filtered_count = 0;
     
     for (unsigned int i = 0; i < process_count; i++) {
+        // CRITICAL: Use safe PID extraction to handle struct mismatches
+        unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
+        if (actual_pid == 0) {
+            continue;  // Skip if we can't get a valid PID
+        }
+        
         int should_kill = 0;
-        int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+        int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
         
         if (cgroup_check == 1) {
-            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            uid_t proc_uid = proc_get_uid(actual_pid);
             if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                 should_kill = 1;
             }
         } else if (cgroup_check == -1) {
-            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            uid_t proc_uid = proc_get_uid(actual_pid);
             if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
                 should_kill = 1;
             }
         }
         
-        if (should_kill && proc_alive(infos[i].pid) == PROC_STATE_ALIVE) {
-            filtered_processes[filtered_count].pid = infos[i].pid;
+        if (should_kill && proc_alive(actual_pid) == PROC_STATE_ALIVE) {
+            filtered_processes[filtered_count].pid = actual_pid;
             filtered_processes[filtered_count].memory = infos[i].usedGpuMemory;
             filtered_count++;
         }
@@ -874,17 +893,23 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     
     // Sum up memory from all processes belonging to current SLURM job (or current user if not in SLURM)
     for (unsigned int i = 0; i < process_count; i++) {
+        // CRITICAL: Use safe PID extraction to handle struct mismatches
+        unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
+        if (actual_pid == 0) {
+            continue;  // Skip if we can't get a valid PID
+        }
+        
         // First try to check if process belongs to current cgroup session
-        int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+        int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
         
         if (cgroup_check == -1) {
             // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
-            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            uid_t proc_uid = proc_get_uid(actual_pid);
             
             if (proc_uid == (uid_t)-1) {
                 // Couldn't read UID - skip this process to avoid blocking on shared region lock
                 LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - could not read UID, skipping", 
-                         i, infos[i].pid);
+                         i, actual_pid);
                 continue;
             } else if (proc_uid != current_uid) {
                 continue;

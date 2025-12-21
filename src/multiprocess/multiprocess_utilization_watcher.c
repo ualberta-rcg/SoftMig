@@ -25,6 +25,7 @@
 #include "multiprocess/multiprocess_utilization_watcher.h"
 #include "include/log_utils.h"
 #include "include/nvml_override.h"
+#include "include/process_utils.h"
 
 // Local versioned struct definition to avoid including nvml-subset.h (which conflicts with system nvml.h)
 // This matches the v2 struct layout expected by the driver NVML library
@@ -190,7 +191,12 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
       }
       if (res == NVML_SUCCESS || res == NVML_ERROR_INSUFFICIENT_SIZE) {
         for (i=0; i<infcount; i++){
-          proc = find_proc_by_hostpid(infos[i].pid);
+          // CRITICAL: Use safe PID extraction to handle struct mismatches
+          unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
+          if (actual_pid == 0) {
+            continue;  // Skip if we can't get a valid PID
+          }
+          proc = find_proc_by_hostpid(actual_pid);
           if (proc != NULL){
               proc->monitorused[cudadev] = infos[i].usedGpuMemory;
           }

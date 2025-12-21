@@ -2,6 +2,8 @@
 #include <ctype.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <sys/stat.h>
+#include <unistd.h>
 // Prevent system <nvml.h> from being included - we use nvml-subset.h instead
 // This macro tells nvml.h (if included) to skip some definitions
 #define NVML_NO_UNVERSIONED_FUNC_DEFS
@@ -404,12 +406,19 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     
     // Sum up memory from all processes belonging to current cgroup session (or current user if not in cgroup)
     for (unsigned int i = 0; i < process_count; i++) {
+        // CRITICAL: Use safe PID extraction to handle struct mismatches
+        unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
+        if (actual_pid == 0) {
+            skipped_count++;
+            continue;  // Skip if we can't get a valid PID
+        }
+        
         // First try to check if process belongs to current cgroup session
-        int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
+        int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
         
         if (cgroup_check == -1) {
             // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
-            uid_t proc_uid = proc_get_uid(infos[i].pid);
+            uid_t proc_uid = proc_get_uid(actual_pid);
             
             if (proc_uid == (uid_t)-1) {
                 // Couldn't read UID - skip this process to avoid blocking on shared region lock

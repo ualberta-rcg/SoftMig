@@ -2,6 +2,11 @@
 #include "include/log_utils.h"
 #include <stdlib.h>
 #include <errno.h>
+#include <sys/stat.h>
+#include <string.h>
+// Include nvml-subset.h for nvmlProcessInfo_t definition
+#define NVML_NO_UNVERSIONED_FUNC_DEFS
+#include "include/nvml-subset.h"
 
 // Get the UID of a process by PID (returns -1 on error)
 uid_t proc_get_uid(int32_t pid) {
@@ -242,5 +247,52 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
     }
     
     return result;
+}
+
+/**
+ * Safely extract PID from nvmlProcessInfo_t, handling struct mismatches
+ * between CUDA toolkit headers and driver library.
+ * 
+ * This function checks if the PID field contains a valid value, and if not,
+ * scans the struct for a valid PID value. This handles cases where:
+ * - CUDA 12.2 headers define struct one way
+ * - Driver 570.x (CUDA 12.8) has different struct layout
+ * 
+ * @param proc Pointer to nvmlProcessInfo_t struct from NVML (void* for header compatibility)
+ * @return Valid PID if found, 0 if not found
+ */
+unsigned int extract_pid_safely(void *proc) {
+    nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
+    unsigned char *raw = (unsigned char *)proc;
+    
+    // Check standard offset first (assuming pid is at offset 4 after version)
+    unsigned int pid = info->pid;
+    if (pid > 1 && pid < 4000000) {
+        // Valid PID range - likely correct
+        return pid;
+    }
+    
+    // Struct mismatch detected - scan for valid PID
+    LOG_WARN("NVML struct mismatch detected (PID=%u invalid), scanning for PID", pid);
+    
+    // Scan first 16 bytes (covers version + pid + start of usedGpuMemory)
+    // PID is typically at offset 4 (after version) or 0 (if version is missing)
+    for (int offset = 0; offset <= 12; offset += 4) {
+        unsigned int candidate = *(unsigned int*)(raw + offset);
+        if (candidate > 1 && candidate < 4000000) {
+            // Verify this looks like a real PID by checking /proc
+            char path[64];
+            snprintf(path, sizeof(path), "/proc/%u", candidate);
+            struct stat st;
+            if (stat(path, &st) == 0) {
+                LOG_INFO("Found valid PID %u at offset %d (original pid field was %u)", 
+                        candidate, offset, pid);
+                return candidate;
+            }
+        }
+    }
+    
+    LOG_WARN("Could not find valid PID in struct (original pid=%u)", pid);
+    return 0;
 }
 

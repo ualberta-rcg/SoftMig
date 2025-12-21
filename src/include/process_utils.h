@@ -26,5 +26,10 @@ int proc_alive(int32_t pid);
 // Supports both cgroups v1 and v2
 int proc_belongs_to_current_cgroup_session(int32_t pid);
 
+// Safely extract PID from nvmlProcessInfo_t, handling struct mismatches
+// between CUDA toolkit headers and driver library
+// Returns valid PID if found, 0 if not found
+unsigned int extract_pid_safely(void *proc);
+
 
 #endif  // __UTILS_PROCESS_UTILS_H__

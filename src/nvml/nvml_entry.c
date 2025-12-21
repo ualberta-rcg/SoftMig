@@ -1588,55 +1588,57 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
              temp_count, SHARED_REGION_MAX_PROCESS_NUM);
   }
   
-  // #region agent log - Log RAW NVML response structure to check for field swapping/corruption
-  // Search for specific target PIDs that may be corrupted/misplaced
-  const unsigned int target_pid1 = 592647;
-  const unsigned int target_pid2 = 592649;
-  LOG_INFO("RAW_NVML_HOOK: Searching for PIDs %u and %u in %u processes", 
-           target_pid1, target_pid2, temp_count);
+  // #region Detailed NVML struct logging - helps debug struct mismatches between CUDA headers and driver
+  // Log detailed information about NVML process structs to detect layout mismatches
+  LOG_DEBUG("RAW_NVML_HOOK: Received %u processes from NVML, struct_size=%zu bytes", 
+           temp_count, sizeof(nvmlProcessInfo_t));
   
-  for (unsigned int i = 0; i < temp_count && i < 20; i++) {
-    LOG_INFO("RAW_NVML_HOOK Process[%u]: pid=%u (0x%x) memory=%llu (0x%llx) struct_size=%zu", 
-              i, all_infos[i].pid, all_infos[i].pid,
-              (unsigned long long)all_infos[i].usedGpuMemory,
-              (unsigned long long)all_infos[i].usedGpuMemory,
-              sizeof(nvmlProcessInfo_t));
-    
-    // Search raw bytes for target PIDs - check if they appear anywhere in the structure
+  for (unsigned int i = 0; i < temp_count && i < 10; i++) {  // Log first 10 processes
     unsigned char *raw_bytes = (unsigned char *)&all_infos[i];
     
-    // Check all 4-byte aligned positions in the structure for the target PIDs
-    for (size_t offset = 0; offset <= sizeof(nvmlProcessInfo_t) - sizeof(unsigned int); offset += sizeof(unsigned int)) {
-      unsigned int *value = (unsigned int *)(raw_bytes + offset);
-      if (*value == target_pid1) {
-        LOG_INFO("RAW_NVML_HOOK Process[%u]: Found PID %u at byte offset %zu", i, target_pid1, offset);
-      }
-      if (*value == target_pid2) {
-        LOG_INFO("RAW_NVML_HOOK Process[%u]: Found PID %u at byte offset %zu", i, target_pid2, offset);
-      }
+    // Extract PID using safe method to detect mismatches
+    unsigned int safe_pid = extract_pid_safely((void *)&all_infos[i]);
+    
+    // Log struct fields as interpreted by headers
+    LOG_DEBUG("RAW_NVML_HOOK Process[%u]: struct fields - version=%u pid=%u (0x%x) memory=%llu (0x%llx)", 
+              i, all_infos[i].version, all_infos[i].pid, all_infos[i].pid,
+              (unsigned long long)all_infos[i].usedGpuMemory,
+              (unsigned long long)all_infos[i].usedGpuMemory);
+    
+    // Log safe PID extraction result
+    if (safe_pid != all_infos[i].pid && safe_pid != 0) {
+      LOG_WARN("RAW_NVML_HOOK Process[%u]: STRUCT MISMATCH DETECTED - header pid=%u, safe_pid=%u (offset mismatch)", 
+               i, all_infos[i].pid, safe_pid);
+    } else if (safe_pid == 0 && all_infos[i].pid > 0) {
+      LOG_WARN("RAW_NVML_HOOK Process[%u]: INVALID PID - header pid=%u could not be validated", 
+               i, all_infos[i].pid);
     }
     
-    // Also check if memory field interpreted as different types contains the PID
-    if (all_infos[i].usedGpuMemory == target_pid1) {
-      LOG_INFO("RAW_NVML_HOOK Process[%u]: memory field equals target PID %u", i, target_pid1);
+    // Log raw hex dump of entire struct for detailed inspection
+    // This helps identify where fields actually are in the struct
+    char hex_dump[256] = {0};
+    char *hex_ptr = hex_dump;
+    size_t struct_size = sizeof(nvmlProcessInfo_t);
+    size_t dump_size = (struct_size < 24) ? struct_size : 24;  // Dump first 24 bytes
+    for (size_t j = 0; j < dump_size; j++) {
+      hex_ptr += sprintf(hex_ptr, "%02x ", raw_bytes[j]);
     }
-    if (all_infos[i].usedGpuMemory == target_pid2) {
-      LOG_INFO("RAW_NVML_HOOK Process[%u]: memory field equals target PID %u", i, target_pid2);
-    }
+    LOG_DEBUG("RAW_NVML_HOOK Process[%u] raw_bytes[0-%zu]: %s(struct_size=%zu)", 
+              i, dump_size - 1, hex_dump, struct_size);
     
-    // Check if pid field matches (even if it looks corrupted)
-    if (all_infos[i].pid == target_pid1 || all_infos[i].pid == target_pid2) {
-      LOG_INFO("RAW_NVML_HOOK Process[%u]: pid field matches target PID %u", i, all_infos[i].pid);
-    }
-    
-    // Log raw hex dump of first 16 bytes for detailed inspection
-    if (i < 5) {  // Only for first 5 processes to avoid spam
-      char hex_dump[64] = {0};
-      char *hex_ptr = hex_dump;
-      for (size_t j = 0; j < sizeof(nvmlProcessInfo_t) && j < 16; j++) {
-        hex_ptr += sprintf(hex_ptr, "%02x ", raw_bytes[j]);
+    // Log all 4-byte aligned values in the struct to help identify field positions
+    if (i < 3) {  // Only for first 3 processes to avoid spam
+      LOG_DEBUG("RAW_NVML_HOOK Process[%u] struct field scan:", i);
+      for (size_t offset = 0; offset < struct_size && offset < 24; offset += sizeof(unsigned int)) {
+        unsigned int *value = (unsigned int *)(raw_bytes + offset);
+        if (*value > 1 && *value < 4000000) {  // Looks like a PID
+          LOG_DEBUG("  offset %zu: %u (0x%x) - possible PID", offset, *value, *value);
+        } else if (*value > 0 && *value < 3) {  // Looks like version
+          LOG_DEBUG("  offset %zu: %u - possible version", offset, *value);
+        } else if (*value > 0) {
+          LOG_DEBUG("  offset %zu: %u (0x%x)", offset, *value, *value);
+        }
       }
-      LOG_INFO("RAW_NVML_HOOK Process[%u] raw_bytes[0-15]: %s", i, hex_dump);
     }
   }
   // #endregion
@@ -1661,7 +1663,13 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
       }
     } else {
       // Non-root users: filter by cgroup session first, fall back to UID
-      int cgroup_check = proc_belongs_to_current_cgroup_session(all_infos[i].pid);
+      // CRITICAL: Use safe PID extraction to handle struct mismatches
+      unsigned int actual_pid = extract_pid_safely((void *)&all_infos[i]);
+      if (actual_pid == 0) {
+        continue;  // Skip if we can't get a valid PID
+      }
+      
+      int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
       int should_include = 0;
       
       if (cgroup_check == 1) {
@@ -1669,7 +1677,7 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
         should_include = 1;
       } else if (cgroup_check == -1) {
         // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
-        uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+        uid_t proc_uid = proc_get_uid(actual_pid);
         
         if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
           should_include = 1;
@@ -1735,42 +1743,48 @@ nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
       }
     } else {
       // Non-root users: filter by cgroup session first, fall back to UID
+      // CRITICAL: Use safe PID extraction to handle struct mismatches
+      unsigned int actual_pid = extract_pid_safely((void *)&all_infos[i]);
+      if (actual_pid == 0) {
+        continue;  // Skip if we can't get a valid PID
+      }
+      
       LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx)", 
-               i, all_infos[i].pid, (unsigned long long)all_infos[i].usedGpuMemory, 
+               i, actual_pid, (unsigned long long)all_infos[i].usedGpuMemory, 
                (unsigned long long)all_infos[i].usedGpuMemory);
       
-      int cgroup_check = proc_belongs_to_current_cgroup_session(all_infos[i].pid);
+      int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
       
       LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
-               i, all_infos[i].pid, cgroup_check);
+               i, actual_pid, cgroup_check);
       
       int should_include = 0;
       
       if (cgroup_check == 1) {
         // Process belongs to current cgroup session - include it
         should_include = 1;
-        uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+        uid_t proc_uid = proc_get_uid(actual_pid);
         LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same cgroup, proc_uid=%u current_uid=%u)", 
-                 i, all_infos[i].pid, proc_uid, current_uid);
+                 i, actual_pid, proc_uid, current_uid);
       } else if (cgroup_check == -1) {
         // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
-        uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+        uid_t proc_uid = proc_get_uid(actual_pid);
         
         LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
-                 i, all_infos[i].pid, proc_uid, current_uid);
+                 i, actual_pid, proc_uid, current_uid);
         if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
           should_include = 1;
           LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same UID %u, cgroup unavailable)", 
-                   i, all_infos[i].pid, proc_uid);
+                   i, actual_pid, proc_uid);
         } else {
           LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (UID %u != current %u)", 
-                   i, all_infos[i].pid, proc_uid, current_uid);
+                   i, actual_pid, proc_uid, current_uid);
         }
       } else {
         // cgroup_check == 0 means different cgroup session - exclude it
-        uid_t proc_uid = proc_get_uid(all_infos[i].pid);
+        uid_t proc_uid = proc_get_uid(actual_pid);
         LOG_INFO("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (different cgroup session, proc_uid=%u current_uid=%u)", 
-                 i, all_infos[i].pid, proc_uid, current_uid);
+                 i, actual_pid, proc_uid, current_uid);
       }
       
       if (should_include) {

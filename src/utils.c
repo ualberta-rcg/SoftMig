@@ -237,11 +237,18 @@ nvmlReturn_t set_task_pid() {
             }
         }while(res==NVML_ERROR_INSUFFICIENT_SIZE);
         
-        // Log raw NVML data before merging (for debugging PID=0 issues)
-        LOG_INFO("set_task_pid: BEFORE context - NVML returned %u processes on device %d", previous, i);
+        // Log raw NVML data before merging (for debugging PID=0 issues and struct mismatches)
+        LOG_INFO("set_task_pid: BEFORE context - NVML returned %u processes on device %d, struct_size=%zu", 
+                 previous, i, sizeof(nvmlProcessInfo_v1_t));
         for (int k=0; k<previous && k<10; k++) {  // Log first 10 to avoid spam
-            LOG_INFO("  Raw NVML[%d]: PID=%u, memory=%llu", k, tmp_pids_on_device[k].pid, 
+            unsigned int safe_pid = extract_pid_safely((void *)&tmp_pids_on_device[k]);
+            LOG_INFO("  Raw NVML[%d]: version=%u header_pid=%u safe_pid=%u, memory=%llu", 
+                    k, tmp_pids_on_device[k].version, tmp_pids_on_device[k].pid, safe_pid,
                     (unsigned long long)tmp_pids_on_device[k].usedGpuMemory);
+            if (safe_pid != tmp_pids_on_device[k].pid && safe_pid != 0) {
+                LOG_WARN("  Raw NVML[%d]: STRUCT MISMATCH - header_pid=%u, safe_pid=%u", 
+                         k, tmp_pids_on_device[k].pid, safe_pid);
+            }
         }
         
         mergepid(&previous,&merged_num,(nvmlProcessInfo_t1 *)tmp_pids_on_device,pre_pids_on_device);
@@ -273,11 +280,18 @@ nvmlReturn_t set_task_pid() {
             }
         }while(res == NVML_ERROR_INSUFFICIENT_SIZE);
         
-        // Log raw NVML data after creating context (for debugging PID=0 issues)
-        LOG_INFO("set_task_pid: AFTER context - NVML returned %u processes on device %d", running_processes, i);
+        // Log raw NVML data after creating context (for debugging PID=0 issues and struct mismatches)
+        LOG_INFO("set_task_pid: AFTER context - NVML returned %u processes on device %d, struct_size=%zu", 
+                 running_processes, i, sizeof(nvmlProcessInfo_v1_t));
         for (int k=0; k<running_processes && k<10; k++) {  // Log first 10 to avoid spam
-            LOG_INFO("  Raw NVML[%d]: PID=%u, memory=%llu", k, tmp_pids_on_device[k].pid, 
+            unsigned int safe_pid = extract_pid_safely((void *)&tmp_pids_on_device[k]);
+            LOG_INFO("  Raw NVML[%d]: version=%u header_pid=%u safe_pid=%u, memory=%llu", 
+                    k, tmp_pids_on_device[k].version, tmp_pids_on_device[k].pid, safe_pid,
                     (unsigned long long)tmp_pids_on_device[k].usedGpuMemory);
+            if (safe_pid != tmp_pids_on_device[k].pid && safe_pid != 0) {
+                LOG_WARN("  Raw NVML[%d]: STRUCT MISMATCH - header_pid=%u, safe_pid=%u", 
+                         k, tmp_pids_on_device[k].pid, safe_pid);
+            }
         }
         
         mergepid(&running_processes,&merged_num,(nvmlProcessInfo_t1 *)tmp_pids_on_device,pids_on_device);
