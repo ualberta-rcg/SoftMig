@@ -16,7 +16,6 @@ size_t IPCSIZE = 2097152;
 size_t OVERSIZE = 134217728;
 //int pidfound;
 
-region_list *r_list;
 allocated_list *device_overallocated;
 allocated_list *device_allocasync;
 
@@ -122,34 +121,6 @@ int oom_check(const int dev, size_t addon) {
     return result;
 }
 
-CUresult view_vgpu_allocator() {
-    allocated_list_entry *al;
-    size_t total;
-    total=0;
-    LOG_INFO("[view1]:overallocated:");
-    for (al=device_overallocated->head;al!=NULL;al=al->next){
-        LOG_INFO("(%p %lu)\t",(void *)al->entry->address,al->entry->length);
-        total+=al->entry->length;
-    }
-    LOG_INFO("total=%lu",total);
-    size_t t = get_current_device_memory_usage(0);
-    LOG_INFO("current_device_memory_usage:%lu",t);
-    return 0;
-}
-
-CUresult get_listsize(allocated_list *al, size_t *size) {
-    if (al->length == 0){
-        *size = 0;
-        return CUDA_SUCCESS;
-    }
-    size_t count=0;
-    allocated_list_entry *val;
-    for (val=al->head;val!=NULL;val=val->next){
-        count+=val->entry->length;
-    }
-    *size = count;
-    return CUDA_SUCCESS;
-}
 
 void allocator_init() {
     LOG_DEBUG("Allocator_init\n");

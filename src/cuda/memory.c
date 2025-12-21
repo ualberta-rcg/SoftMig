@@ -53,7 +53,6 @@ extern size_t round_up(size_t size,size_t align);
 extern void rate_limiter(int grids, int blocks);
 
 int check_oom() {
-//    return 0;
     CUdevice dev;
     CHECK_DRV_API(cuCtxGetDevice(&dev));
     return oom_check(dev,0);
@@ -207,10 +206,6 @@ CUresult cuMemFree_v2(CUdeviceptr dptr) {
 
 
 CUresult cuMemFreeHost(void* hptr) {
-    /*CUdeviceptr dptr;*/
-    /*CHECK_DRV_API(cuMemHostGetDevicePointer(&dptr, hptr, 0));*/
-    /*size_t bytesize;*/
-    /*CHECK_DRV_API(cuMemGetAddressRange(NULL, &bytesize, dptr));*/
     LOG_DEBUG("cuMemFreeHost_v2 hptr=%p",hptr);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFreeHost, hptr);
     return res;
@@ -233,12 +228,6 @@ CUresult cuMemHostAlloc(void** hptr, size_t bytesize, unsigned int flags) {
 
 
 CUresult cuMemHostRegister_v2(void* hptr, size_t bytesize, unsigned int flags) {
-    /*int trackable = 1;*/
-    /*if (flags != CU_MEMHOSTREGISTER_DEVICEMAP) {*/
-    /*    fprintf(stderr, "only CU_MEMHOSTREGISTER_DEVICEMAP can be freed, current=%u\n", flags);*/
-    /*    trackable = 0;*/
-    /*}*/
-    // TODO: process flags properly
     LOG_DEBUG("cuMemHostRegister_v2 hptr=%p bytesize=%ld",hptr,bytesize);
     CUdevice dev;
     cuCtxGetDevice(&dev);
@@ -252,29 +241,14 @@ CUresult cuMemHostRegister_v2(void* hptr, size_t bytesize, unsigned int flags) {
         CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemHostUnregister, hptr);
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
-    //LOG_WARN("222:%d(%p:%ld)",res,hptr,bytesize);
     return res;
-    //return CUDA_SUCCESS;
 }
 
 
 CUresult cuMemHostUnregister(void* hptr) {
-    /*CUdeviceptr dptr;*/
-    /*CUresult flag = cuMemHostGetDevicePointer(&dptr, hptr, 0);*/
-    /*size_t bytesize = 0;*/
-    /*if (flag == CUDA_SUCCESS) {*/
-    /*    // only device map registry is trackable*/
-    /*    CHECK_DRV_API(cuMemGetAddressRange(NULL, &bytesize, dptr));*/
-    /*}*/
     LOG_DEBUG("cuMemHostUnregister hptr=%p",hptr);
     ENSURE_RUNNING();
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemHostUnregister, hptr);
-    
-    /*if (flag == CUDA_SUCCESS && bytesize > 0) {*/
-    /*    // only device map registry is trackable*/
-    /*    DECL_MEMORY_ON_SUCCESS(res, bytesize);*/
-    /*}*/
-    //return CUDA_SUCCESS;    
     return res;
 }
 
@@ -379,7 +353,6 @@ CUresult cuMemcpyDtoDAsync_v2( CUdeviceptr dstDevice, CUdeviceptr srcDevice, siz
 }
 
 CUresult cuMemcpyDtoH_v2(void* dstHost, CUdeviceptr srcDevice, size_t ByteCount) {
-    // TODO: compute bytesize
     LOG_DEBUG("cuMemcpyDtoH_v2,dst=%p src=%llx count=%lu",dstHost,srcDevice,ByteCount);
     ENSURE_RUNNING();
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpyDtoH_v2, dstHost, srcDevice, ByteCount);
@@ -394,7 +367,6 @@ CUresult cuMemcpyDtoHAsync_v2 ( void* dstHost, CUdeviceptr srcDevice, size_t Byt
 
 
 CUresult cuMemcpyHtoD_v2(CUdeviceptr srcDevice, const void* dstHost, size_t ByteCount) {
-    // TODO: compute bytesize
     LOG_DEBUG("cuMemcpyHtoD_v2,srcDevice=%llx dstHost=%p count=%lu",srcDevice,dstHost,ByteCount);
     ENSURE_RUNNING();
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpyHtoD_v2, srcDevice, dstHost, ByteCount);
@@ -593,7 +565,6 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo_v2(size_t* free, size_t* total) {
 CUresult cuMipmappedArrayCreate(CUmipmappedArray* pHandle, 
                                           const CUDA_ARRAY3D_DESCRIPTOR* pMipmappedArrayDesc, 
                                           unsigned int numMipmapLevels) {
-    // TODO: compute bytesize
     LOG_DEBUG("cuMipmappedArrayCreate\n");
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMipmappedArrayCreate, pHandle, pMipmappedArrayDesc, numMipmapLevels);
     if (res != CUDA_SUCCESS) {
@@ -607,7 +578,6 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray* pHandle,
 }
 
 CUresult cuMipmappedArrayDestroy(CUmipmappedArray hMipmappedArray) {
-    // TODO: compute bytesize
     LOG_DEBUG("cuMipmappedArrayDestory\n");
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMipmappedArrayDestroy, hMipmappedArray);
     return res;
@@ -774,53 +744,23 @@ CUresult cuMemPoolImportPointer(CUdeviceptr *ptr_out, CUmemoryPool pool, CUmemPo
     LOG_DEBUG("cuMemPoolImportPointer");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemPoolImportPointer,ptr_out,pool,shareData);
 }
-/*
-CUresult cuMemcpy2D(const CUDA_MEMCPY2D *pCopy) {
-    LOG_DEBUG("cuMemcpy2D");
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy2D,pCopy);
-}*/
-
 CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *pCopy) {
     LOG_DEBUG("cuMemcpy2D_v2");
     return CUDA_OVERRIDE_CALL(cuda_library_entry, cuMemcpy2D, pCopy);
 }
-/*
-CUresult cuMemcpy2DUnaligned(const CUDA_MEMCPY2D *pCopy) {
-    LOG_DEBUG("cuMemcpy2DUnaligned");
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy2DUnaligned,pCopy);
-}*/
-
 CUresult cuMemcpy2DUnaligned_v2(const CUDA_MEMCPY2D *pCopy) {
     LOG_DEBUG("cuMemcpy2DUnaligned_v2");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy2DUnaligned_v2,pCopy);
 }
-/*
-CUresult cuMemcpy2DAsync(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
-    LOG_DEBUG("cuMemcpy2DAsync");
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy2DAsync,pCopy,hStream);
-}*/
-
 CUresult cuMemcpy2DAsync_v2(const CUDA_MEMCPY2D *pCopy, CUstream hStream) {
     LOG_DEBUG("cuMemcpy2DAsync_v2");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy2DAsync,pCopy,hStream);
 }
 
-/*
-CUresult cuMemcpy3D(const CUDA_MEMCPY3D *pCopy) {
-    LOG_DEBUG("cuMemcpy3D");
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy3D,pCopy);
-}*/
-
 CUresult cuMemcpy3D_v2(const CUDA_MEMCPY3D *pCopy) {
     LOG_DEBUG("cuMemcpy3D_v2");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy3D_v2,pCopy);
 }
-/*
-CUresult cuMemcpy3DAsync(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
-    LOG_DEBUG("cuMemcpy3DAsync");
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy3DAsync,pCopy,hStream);
-}*/
-
 CUresult cuMemcpy3DAsync_v2(const CUDA_MEMCPY3D *pCopy, CUstream hStream) {
     LOG_DEBUG("cuMemcpy3DAsync_v2");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy3DAsync_v2,pCopy,hStream);

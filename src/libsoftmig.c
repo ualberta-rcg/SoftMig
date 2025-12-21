@@ -1,4 +1,3 @@
-//#include "memory_limit.h"
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -15,11 +14,9 @@
 
 extern void init_utilization_watcher(void);
 extern void utilization_watcher(void);
-extern void initial_virtual_map(void); 
 extern int set_host_pid(int hostpid);
 extern void allocator_init(void);
 void preInit();
-char *(*real_realpath)(const char *path, char *resolved_path);
 void *vgpulib;
 
 pthread_once_t pre_cuinit_flag = PTHREAD_ONCE_INIT;
@@ -250,8 +247,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuCtxSetSharedMemConfig);
 #pragma GCC diagnostic pop
     DLSYM_HOOK_FUNC(cuCtxSynchronize);
-    //DLSYM_HOOK_FUNC(cuCtxEnablePeerAccess);
-    //DLSYM_HOOK_FUNC(cuGetExportTable);
     DLSYM_HOOK_FUNC(cuArray3DCreate_v2);
     DLSYM_HOOK_FUNC(cuArrayCreate_v2);
     DLSYM_HOOK_FUNC(cuArrayDestroy);
@@ -922,8 +917,6 @@ void* __dlsym_hook_section_nvml(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(nvmlDeviceGetGraphicsRunningProcesses_v2);
     /** nvmlDeviceSetTemperatureThreshold */
     DLSYM_HOOK_FUNC(nvmlDeviceSetTemperatureThreshold);
-    /** nvmlRetry_NvRmControl */
-    //DLSYM_HOOK_FUNC(nvmlRetry_NvRmControl);
     /** nvmlVgpuInstanceGetGpuInstanceId */
     DLSYM_HOOK_FUNC(nvmlVgpuInstanceGetGpuInstanceId);
     /** nvmlVgpuTypeGetGpuInstanceProfileId */
@@ -936,9 +929,7 @@ void preInit(){
     if (real_dlsym == NULL) {
         real_dlsym = get_real_dlsym_safe();
     }
-    real_realpath = NULL;
     load_cuda_libraries();
-    //nvmlInit();
     ENSURE_INITIALIZED();
 }
 

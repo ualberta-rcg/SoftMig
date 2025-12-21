@@ -61,12 +61,6 @@ extern int wait_status_self(int status);
     if (res == CUDA_SUCCESS) {                            \
         decl_current_device_memory_usage(dev, bytes);     \
     }                                                     \
-/*
-#define OOM_CHECK()                                       \
-    CUdevice dev;                                         \
-    CHECK_DRV_API(cuCtxGetDevice(&dev));                  \
-    oom_check(dev);
-*/
 
 #include "multiprocess/multiprocess_memory_limit.h"
 

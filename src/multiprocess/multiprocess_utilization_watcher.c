@@ -22,7 +22,6 @@
 #include "multiprocess/multiprocess_utilization_watcher.h"
 #include "include/log_utils.h"
 #include "include/nvml_override.h"
-#include "multiprocess/config_file.h"
 
 
 static int g_sm_num;
