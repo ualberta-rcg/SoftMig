@@ -218,19 +218,10 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
     
     int result = -1;
     
-    LOG_INFO("proc_belongs_to_current_cgroup_session: Checking PID %d (current PID %d, current UID %u) - current_cgroup='%s' proc_cgroup='%s' current_job_id=%s proc_job_id=%s", 
-             pid, current_pid, current_uid, 
-             current_cgroup ? current_cgroup : "NULL",
-             proc_cgroup ? proc_cgroup : "NULL",
-             current_job_id ? current_job_id : "NULL",
-             proc_job_id ? proc_job_id : "NULL");
-    
     if (current_job_id != NULL && proc_job_id != NULL) {
         // Both have job IDs - compare them
         int job_match = (strcmp(current_job_id, proc_job_id) == 0);
         result = job_match ? 1 : 0;
-        LOG_INFO("proc_belongs_to_current_cgroup_session: PID %d - job ID comparison: current='%s' proc='%s' match=%d result=%d", 
-                 pid, current_job_id, proc_job_id, job_match, result);
     } else if (current_job_id == NULL && proc_job_id == NULL) {
         // Neither has a job ID - compare full cgroup paths
         // Check if they share the same parent path (up to the job level)
@@ -238,13 +229,8 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
         // This will match if they're in the same cgroup hierarchy
         int path_match = (strcmp(current_cgroup, proc_cgroup) == 0);
         result = path_match ? 1 : 0;
-        LOG_INFO("proc_belongs_to_current_cgroup_session: PID %d - path comparison (no job IDs): match=%d result=%d", 
-                 pid, path_match, result);
-    } else {
-        // If one has a job ID and the other doesn't, they're different (result stays -1)
-        LOG_INFO("proc_belongs_to_current_cgroup_session: PID %d - one has job ID, other doesn't: current_job_id=%s proc_job_id=%s, result=-1", 
-                 pid, current_job_id ? current_job_id : "NULL", proc_job_id ? proc_job_id : "NULL");
     }
+    // If one has a job ID and the other doesn't, they're different (result stays -1)
     
     free(current_cgroup);
     free(proc_cgroup);

@@ -370,7 +370,6 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
                                                    nvmlDeviceGetComputeRunningProcesses, 
                                                    device, &process_count, infos);
     
-    LOG_INFO("sum_process_memory_from_nvml: nvmlDeviceGetComputeRunningProcesses returned %d, process_count=%u", ret, process_count);
     
     if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
         // If we can't get process info, fall back to tracked usage
@@ -388,60 +387,30 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     // Get current user's UID for fallback filtering
     uid_t current_uid = getuid();
     
-    LOG_DEBUG("sum_process_memory_from_nvml: Found %u processes on device, filtering by cgroup session or UID %u", process_count, current_uid);
-    
     unsigned int included_count = 0;
     unsigned int skipped_count = 0;
     
     // Sum up memory from all processes belonging to current cgroup session (or current user if not in cgroup)
     for (unsigned int i = 0; i < process_count; i++) {
-        // Log all process information from NVML
-        LOG_INFO("sum_process_memory_from_nvml: Process[%u] - PID=%u, usedGpuMemory=%llu bytes (0x%llx)", 
-                 i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory, 
-                 (unsigned long long)infos[i].usedGpuMemory);
-        
         // First try to check if process belongs to current cgroup session
         int cgroup_check = proc_belongs_to_current_cgroup_session(infos[i].pid);
-        
-        LOG_INFO("sum_process_memory_from_nvml: Process[%u] PID %u - cgroup_check=%d (1=same, 0=different, -1=error/fallback)", 
-                 i, infos[i].pid, cgroup_check);
         
         if (cgroup_check == -1) {
             // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
             uid_t proc_uid = proc_get_uid(infos[i].pid);
             
-            LOG_INFO("sum_process_memory_from_nvml: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
-                     i, infos[i].pid, proc_uid, current_uid);
-            
             if (proc_uid == (uid_t)-1) {
                 // Couldn't read UID - skip this process to avoid blocking on shared region lock
-                // We don't want to block nvidia-smi if another process is holding the lock
-                // If the process belongs to us, it will be counted when we can read its UID
-                LOG_WARN("sum_process_memory_from_nvml: Process[%u] PID=%u: skipping (could not read UID from /proc/%d/status - avoiding lock contention)", 
-                         i, infos[i].pid, infos[i].pid);
                 skipped_count++;
                 continue;
             } else if (proc_uid != current_uid) {
-                LOG_INFO("sum_process_memory_from_nvml: Process[%u] PID=%u: skipping (UID %u != current UID %u)", 
-                         i, infos[i].pid, proc_uid, current_uid);
                 skipped_count++;
                 continue;
-            } else {
-                LOG_INFO("sum_process_memory_from_nvml: Process[%u] PID %u - UID match, including in usage calculation", 
-                         i, infos[i].pid);
             }
         } else if (cgroup_check == 0) {
             // Process is in a different cgroup session - skip it
-            uid_t proc_uid = proc_get_uid(infos[i].pid);
-            LOG_INFO("sum_process_memory_from_nvml: Process[%u] PID=%u: skipping (different cgroup session, proc_uid=%u current_uid=%u)", 
-                     i, infos[i].pid, proc_uid, current_uid);
             skipped_count++;
             continue;
-        } else {
-            // cgroup_check == 1 means process belongs to current cgroup session
-            uid_t proc_uid = proc_get_uid(infos[i].pid);
-            LOG_INFO("sum_process_memory_from_nvml: Process[%u] PID %u - same cgroup session, including (proc_uid=%u current_uid=%u)", 
-                     i, infos[i].pid, proc_uid, current_uid);
         }
         // cgroup_check == 1 means process belongs to current cgroup session - include it
         
@@ -454,24 +423,11 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
             uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
             uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
             total_usage += process_mem_counted;
-            LOG_DEBUG("  Process[%u] PID=%u: %llu bytes (%.2f MiB) + 5%% = %llu bytes (%.2f MiB)", 
-                     i, infos[i].pid,
-                     (unsigned long long)process_mem, process_mem / (1024.0 * 1024.0),
-                     (unsigned long long)process_mem_counted, process_mem_counted / (1024.0 * 1024.0));
         } else {
             // Even if NVML reports 0 or unavailable, count minimum for the process
             total_usage += MIN_PROCESS_MEMORY;
-            LOG_DEBUG("  Process[%u] PID=%u: usedGpuMemory=%llu (unavailable/zero), counting minimum %llu bytes (%.2f MiB)", 
-                     i, infos[i].pid, (unsigned long long)infos[i].usedGpuMemory,
-                     (unsigned long long)MIN_PROCESS_MEMORY, MIN_PROCESS_MEMORY / (1024.0 * 1024.0));
         }
     }
-    
-    LOG_INFO("sum_process_memory_from_nvml: Included %u processes, skipped %u processes (different cgroup session/UID or couldn't read)", 
-             included_count, skipped_count);
-    
-    LOG_INFO("sum_process_memory_from_nvml: Total usage (current cgroup session/user) = %llu bytes (%.2f MiB)", 
-             (unsigned long long)total_usage, total_usage / (1024.0 * 1024.0));
     
     return total_usage;
 }

@@ -32,7 +32,6 @@ typedef CUresult (*cuda_sym_t)();
 
 #define CUDA_OVERRIDE_CALL(table, sym, ...)                                    \
   ({    \
-    LOG_DEBUG("Hijacking %s", #sym);                                           \
     cuda_sym_t _entry = (cuda_sym_t)CUDA_FIND_ENTRY(table, sym);               \
     _entry(__VA_ARGS__);                                                       \
   })

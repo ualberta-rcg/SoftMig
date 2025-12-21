@@ -254,7 +254,6 @@ void load_cuda_libraries() {
     }
 
     for (i = 0; i < CUDA_ENTRY_END; i++) {
-        LOG_DEBUG("LOADING %s %d",cuda_library_entry[i].name,i);
         cuda_library_entry[i].fn_ptr = real_dlsym(table, cuda_library_entry[i].name);
         if (!cuda_library_entry[i].fn_ptr) {
             cuda_library_entry[i].fn_ptr=real_dlsym(RTLD_NEXT,cuda_library_entry[i].name);

@@ -33,7 +33,6 @@ typedef nvmlReturn_t (*driver_sym_t)();
 
 #define NVML_OVERRIDE_CALL(table, sym, ...)                                    \
   ({                                                                           \
-    LOG_DEBUG("Hijacking %s", #sym);                                           \
     driver_sym_t _entry = NVML_FIND_ENTRY(table, sym);                         \
     _entry(__VA_ARGS__);                                                       \
   })

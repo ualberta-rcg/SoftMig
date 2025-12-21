@@ -1552,19 +1552,75 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
                          nvmlDeviceGetComputeRunningProcesses_v2, device,
                          &temp_count, all_infos);
   
-  if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+  // Log if we didn't get the full process list
+  if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
+    LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v2: Buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.", 
+             temp_count, SHARED_REGION_MAX_PROCESS_NUM);
+  } else if (ret != NVML_SUCCESS) {
     // If call failed, pass through the error
+    LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v2: NVML call failed with error %d", ret);
     *infoCount = 0;
     return ret;
+  } else {
+    LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Successfully retrieved %u processes from NVML (buffer size %u)", 
+             temp_count, SHARED_REGION_MAX_PROCESS_NUM);
   }
   
   // #region agent log - Log RAW NVML response structure to check for field swapping/corruption
+  // Search for specific target PIDs that may be corrupted/misplaced
+  const unsigned int target_pid1 = 592647;
+  const unsigned int target_pid2 = 592649;
+  LOG_INFO("RAW_NVML_HOOK: Searching for PIDs %u and %u in %u processes", 
+           target_pid1, target_pid2, temp_count);
+  
   for (unsigned int i = 0; i < temp_count && i < 20; i++) {
-    LOG_DEBUG("RAW_NVML_HOOK Process[%u]: pid=%u (0x%x) memory=%llu (0x%llx) struct_size=%zu", 
+    LOG_INFO("RAW_NVML_HOOK Process[%u]: pid=%u (0x%x) memory=%llu (0x%llx) struct_size=%zu", 
               i, all_infos[i].pid, all_infos[i].pid,
               (unsigned long long)all_infos[i].usedGpuMemory,
               (unsigned long long)all_infos[i].usedGpuMemory,
               sizeof(nvmlProcessInfo_t));
+    
+    // Search raw bytes for target PIDs - check if they appear anywhere in the structure
+    unsigned char *raw_bytes = (unsigned char *)&all_infos[i];
+    int found_pid1 = 0, found_pid2 = 0;
+    
+    // Check all 4-byte aligned positions in the structure for the target PIDs
+    for (size_t offset = 0; offset <= sizeof(nvmlProcessInfo_t) - sizeof(unsigned int); offset += sizeof(unsigned int)) {
+      unsigned int *value = (unsigned int *)(raw_bytes + offset);
+      if (*value == target_pid1) {
+        LOG_INFO("RAW_NVML_HOOK Process[%u]: Found PID %u at byte offset %zu", i, target_pid1, offset);
+        found_pid1 = 1;
+      }
+      if (*value == target_pid2) {
+        LOG_INFO("RAW_NVML_HOOK Process[%u]: Found PID %u at byte offset %zu", i, target_pid2, offset);
+        found_pid2 = 1;
+      }
+    }
+    
+    // Also check if memory field interpreted as different types contains the PID
+    if (all_infos[i].usedGpuMemory == target_pid1) {
+      LOG_INFO("RAW_NVML_HOOK Process[%u]: memory field equals target PID %u", i, target_pid1);
+      found_pid1 = 1;
+    }
+    if (all_infos[i].usedGpuMemory == target_pid2) {
+      LOG_INFO("RAW_NVML_HOOK Process[%u]: memory field equals target PID %u", i, target_pid2);
+      found_pid2 = 1;
+    }
+    
+    // Check if pid field matches (even if it looks corrupted)
+    if (all_infos[i].pid == target_pid1 || all_infos[i].pid == target_pid2) {
+      LOG_INFO("RAW_NVML_HOOK Process[%u]: pid field matches target PID %u", i, all_infos[i].pid);
+    }
+    
+    // Log raw hex dump of first 16 bytes for detailed inspection
+    if (i < 5) {  // Only for first 5 processes to avoid spam
+      char hex_dump[64] = {0};
+      char *hex_ptr = hex_dump;
+      for (size_t j = 0; j < sizeof(nvmlProcessInfo_t) && j < 16; j++) {
+        hex_ptr += sprintf(hex_ptr, "%02x ", raw_bytes[j]);
+      }
+      LOG_INFO("RAW_NVML_HOOK Process[%u] raw_bytes[0-15]: %s", i, hex_dump);
+    }
   }
   // #endregion
   
@@ -1574,8 +1630,6 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
   unsigned int max_output = *infoCount;  // Save the output buffer size
   int is_root = (current_uid == 0);  // Root user (UID 0) sees all processes
   
-  LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Got %u processes from NVML, filtering for UID %u (root=%d)", 
-           temp_count, current_uid, is_root);
   
   // Iterate through ALL processes and filter by cgroup session or UID (unless root)
   for (unsigned int i = 0; i < temp_count; i++) {
@@ -1619,8 +1673,6 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     }
   }
   
-  LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Filtered %u/%u processes (current UID=%u, is_root=%d)", 
-           filtered_count, temp_count, current_uid, is_root);
   
   *infoCount = filtered_count;
   

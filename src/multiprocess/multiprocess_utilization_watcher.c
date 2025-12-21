@@ -47,13 +47,10 @@ void rate_limiter(int grids, int blocks) {
     	return;
   if (get_utilization_switch()==0)
       return;
-  LOG_DEBUG("grid: %d, blocks: %d", grids, blocks);
-  LOG_DEBUG("launch kernel %ld, curr core: %ld", kernel_size, g_cur_cuda_cores);
   //if (g_vcuda_config.enable) {
     do {
 CHECK:
       before_cuda_cores = g_cur_cuda_cores;
-      LOG_DEBUG("current core: %ld", g_cur_cuda_cores);
       if (before_cuda_cores < 0) {
         nanosleep(&g_cycle, NULL);
         goto CHECK;
@@ -70,8 +67,6 @@ CHECK:
 
 static void change_token(long delta) {
   int cuda_cores_before = 0, cuda_cores_after = 0;
-
-  LOG_DEBUG("delta: %ld, curr: %ld", delta, g_cur_cuda_cores);
   // Atomically adjust token pool by delta (can be positive or negative)
   do {
     cuda_cores_before = g_cur_cuda_cores;
@@ -161,7 +156,13 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
 
       //Get Memory for container
       nvmlReturn_t res = nvmlDeviceGetComputeRunningProcesses(device,&infcount,infos);
-      if (res == NVML_SUCCESS) {
+      if (res == NVML_ERROR_INSUFFICIENT_SIZE) {
+        LOG_WARN("get_used_gpu_utilization: Device %d - Buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.", 
+                 cudadev, infcount, SHARED_REGION_MAX_PROCESS_NUM);
+      } else if (res != NVML_SUCCESS) {
+        LOG_WARN("get_used_gpu_utilization: Device %d - nvmlDeviceGetComputeRunningProcesses failed with error %d", cudadev, res);
+      }
+      if (res == NVML_SUCCESS || res == NVML_ERROR_INSUFFICIENT_SIZE) {
         for (i=0; i<infcount; i++){
           proc = find_proc_by_hostpid(infos[i].pid);
           if (proc != NULL){
@@ -175,7 +176,13 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
       nvmlProcessUtilizationSample_t processes_sample[SHARED_REGION_MAX_PROCESS_NUM];
       unsigned int processes_num = SHARED_REGION_MAX_PROCESS_NUM;
       res = nvmlDeviceGetProcessUtilization(device,processes_sample,&processes_num,microsec);
-      if (res == NVML_SUCCESS) {
+      if (res == NVML_ERROR_INSUFFICIENT_SIZE) {
+        LOG_WARN("get_used_gpu_utilization: Device %d - Process utilization buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.", 
+                 cudadev, processes_num, SHARED_REGION_MAX_PROCESS_NUM);
+      } else if (res != NVML_SUCCESS) {
+        LOG_WARN("get_used_gpu_utilization: Device %d - nvmlDeviceGetProcessUtilization failed with error %d", cudadev, res);
+      }
+      if (res == NVML_SUCCESS || res == NVML_ERROR_INSUFFICIENT_SIZE) {
         for (i=0; i<processes_num; i++){
           proc = find_proc_by_hostpid(processes_sample[i].pid);
           if (proc != NULL){
@@ -226,6 +233,8 @@ void* utilization_watcher() {
         // Safety mechanism: if tokens exhausted but share is at max, double the pool
         // This prevents deadlock if initial pool size was too small
         if ((share==g_total_cuda_cores) && (g_cur_cuda_cores<0)) {
+          LOG_WARN("utilization_watcher: Tokens exhausted (g_cur_cuda_cores=%ld) but share at max (%ld), doubling pool size", 
+                   g_cur_cuda_cores, share);
           g_total_cuda_cores *= 2;
           share = g_total_cuda_cores;
         }
@@ -235,12 +244,19 @@ void* utilization_watcher() {
           share = delta(upper_limit, userutil[0], share);
           change_token(share);
         }
-        LOG_INFO("userutil1=%d currentcores=%ld total=%ld limit=%d share=%ld\n",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
+        // Log utilization info less frequently (every 10 iterations = ~1.2 seconds)
+        static unsigned int util_log_counter = 0;
+        if (++util_log_counter >= 10) {
+          util_log_counter = 0;
+          LOG_INFO("utilization_watcher[120ms]: userutil1=%d currentcores=%ld total=%ld limit=%d share=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
+        }
         
         // Memory monitoring: check every ~5 seconds
         memory_check_counter++;
         if (memory_check_counter >= MEMORY_CHECK_INTERVAL) {
             memory_check_counter = 0;
+            LOG_INFO("utilization_watcher[5s]: Starting memory check cycle - userutil[0]=%d currentcores=%ld share=%ld", 
+                    userutil[0], g_cur_cuda_cores, share);
             
             // Only check memory if softmig is enabled and memory limits are configured
             // Check if CUDA_DEVICE_MEMORY_LIMIT is set (similar to how SM limit is checked)
@@ -314,10 +330,16 @@ void* utilization_watcher() {
                             
                             // Trigger gradual OOM killer
                             gradual_oom_killer(cuda_dev);
+                        } else {
+                            LOG_INFO("utilization_watcher[5s]: Device %d (CUDA %d) - memory OK: usage=%llu bytes (%.2f GB) limit=%llu bytes (%.2f GB)", 
+                                    dev_idx, cuda_dev, 
+                                    (unsigned long long)usage, usage / (1024.0 * 1024.0 * 1024.0),
+                                    (unsigned long long)limit, limit / (1024.0 * 1024.0 * 1024.0));
                         }
                     }
                 }
             }
+            LOG_INFO("utilization_watcher[5s]: Completed memory check cycle");
         }
     }
 }
