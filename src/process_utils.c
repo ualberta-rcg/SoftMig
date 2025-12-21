@@ -262,6 +262,23 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
  * @return Valid PID if found, 0 if not found
  */
 unsigned int extract_pid_safely(void *proc) {
+    nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
+    
+    // FIRST: Try the standard PID field - this is the fast path (most common case)
+    // Most of the time, the PID field is correct, so we can avoid expensive scanning
+    unsigned int pid = info->pid;
+    if (pid >= 100 && pid < 4000000 && pid != 0xffffffff) {
+        // Quick validation: check if process exists (this is the only /proc access in fast path)
+        char path[64];
+        snprintf(path, sizeof(path), "/proc/%u/cmdline", pid);
+        if (access(path, F_OK) == 0) {
+            return pid;  // Fast path: standard field is valid - no expensive scanning needed
+        }
+    }
+    
+    // SLOW PATH: Standard field is invalid (0, 0xffffffff, or process doesn't exist)
+    // Only do expensive scanning if the standard field failed
+    // This handles struct mismatches between CUDA headers and driver
     unsigned char *raw = (unsigned char *)proc;
     
     // Scan for valid PID in the struct
@@ -273,33 +290,28 @@ unsigned int extract_pid_safely(void *proc) {
         // Skip invalid PID ranges
         if (candidate < 100 || candidate > 4000000) continue;
         if (candidate == 0xffffffff) continue;
+        // Skip if we already checked this value (it's the standard field)
+        if (candidate == pid) continue;
         
         // Verify it's a real process by checking /proc/%u/cmdline
         // Using cmdline is more reliable than just checking the directory
         char path[64];
         snprintf(path, sizeof(path), "/proc/%u/cmdline", candidate);
         if (access(path, F_OK) == 0) {
-            // Also check the standard field to see if there was a mismatch
-            nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
-            if (candidate != info->pid) {
-                LOG_DEBUG("extract_pid_safely: Found PID %u at offset %d (header pid field was %u)", 
-                         candidate, offset, info->pid);
+            // Found PID at different offset - struct mismatch detected
+            // Only log mismatch as warning (not debug) since this is called very frequently
+            if (pid != 0 && pid != 0xffffffff) {
+                // Only warn on actual mismatches (not invalid header values)
+                static unsigned int mismatch_log_counter = 0;
+                if (++mismatch_log_counter % 100 == 0) {  // Log every 100th mismatch to avoid spam
+                    LOG_WARN("extract_pid_safely: PID mismatch detected - found PID %u at offset %d (header pid field was %u)", 
+                             candidate, offset, pid);
+                }
             }
             return candidate;
         }
     }
     
-    // If we get here, try the standard field as a last resort
-    nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
-    unsigned int pid = info->pid;
-    if (pid >= 100 && pid < 4000000 && pid != 0xffffffff) {
-        char path[64];
-        snprintf(path, sizeof(path), "/proc/%u/cmdline", pid);
-        if (access(path, F_OK) == 0) {
-            return pid;
-        }
-    }
-    
-    return 0;
+    return 0;  // No valid PID found
 }
 

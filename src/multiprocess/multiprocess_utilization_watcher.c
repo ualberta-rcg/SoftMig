@@ -276,11 +276,11 @@ void* utilization_watcher() {
           share = delta(upper_limit, userutil[0], share);
           change_token(share);
         }
-        // Log utilization info less frequently (every 10 iterations = ~1.2 seconds) - DEBUG level for console
+        // Log utilization info every ~5 seconds (42 iterations = 5.04 seconds) - DEBUG level for console
         static unsigned int util_log_counter = 0;
-        if (++util_log_counter >= 10) {
+        if (++util_log_counter >= MEMORY_CHECK_INTERVAL) {
           util_log_counter = 0;
-          LOG_DEBUG("utilization_watcher[120ms]: userutil=%d%% currentcores=%ld total=%ld limit=%d%% share=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
+          LOG_DEBUG("utilization_watcher[5s]: userutil=%d%% currentcores=%ld total=%ld limit=%d%% share=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
         }
         
         // Memory monitoring: check every ~5 seconds
