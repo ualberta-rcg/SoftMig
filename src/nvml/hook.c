@@ -440,9 +440,11 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
         
         included_count++;
         
+        // Extract memory value safely - handles struct mismatches where PID is at wrong offset
+        uint64_t process_mem = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
+        
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
-        if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
-            uint64_t process_mem = infos[i].usedGpuMemory;
+        if (process_mem != NVML_VALUE_NOT_AVAILABLE_ULL && process_mem > 0) {
             // Add 5% overhead, then ensure minimum
             uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
             uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;

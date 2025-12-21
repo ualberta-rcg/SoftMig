@@ -31,6 +31,13 @@ int proc_belongs_to_current_cgroup_session(int32_t pid);
 // Returns valid PID if found, 0 if not found
 unsigned int extract_pid_safely(void *proc);
 
+// Safely extract memory value from nvmlProcessInfo_t when PID is at wrong offset
+// This handles struct mismatches where PID and memory fields are shifted
+// actual_pid: The PID found by extract_pid_safely
+// header_pid: The PID from the header field (infos[i].pid)
+// Returns memory value in bytes, or 0 if not found
+uint64_t extract_memory_safely(void *proc, unsigned int actual_pid, unsigned int header_pid);
+
 // Get process start time (clock ticks since boot) from /proc/PID/stat
 // Returns 0 on error, or starttime (field 22) on success
 unsigned long long proc_get_starttime(int32_t pid);

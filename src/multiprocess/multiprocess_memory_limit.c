@@ -357,8 +357,10 @@ int active_oom_killer() {
                 // Verify process is still alive before killing
                 int proc_state = proc_alive(actual_pid);
                 if (proc_state == PROC_STATE_ALIVE) {
+                    // Extract memory value safely - handles struct mismatches where PID is at wrong offset
+                    uint64_t process_mem = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
                     LOG_ERROR("active_oom_killer: KILLING PID %u (device %u, memory %llu bytes)", 
-                             actual_pid, dev_idx, (unsigned long long)infos[i].usedGpuMemory);
+                             actual_pid, dev_idx, (unsigned long long)process_mem);
                     int kill_result = kill(actual_pid, SIGKILL);
                     if (kill_result == 0) {
                         total_killed++;
@@ -621,7 +623,8 @@ int gradual_oom_killer(int cuda_dev) {
         
         if (should_kill && proc_alive(actual_pid) == PROC_STATE_ALIVE) {
             filtered_processes[filtered_count].pid = actual_pid;
-            filtered_processes[filtered_count].memory = infos[i].usedGpuMemory;
+            // Extract memory value safely - handles struct mismatches where PID is at wrong offset
+            filtered_processes[filtered_count].memory = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
             filtered_count++;
         }
     }
@@ -913,9 +916,11 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
         }
         // cgroup_check == 1 means process belongs to current cgroup session - include it
         
+        // Extract memory value safely - handles struct mismatches where PID is at wrong offset
+        uint64_t process_mem = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
+        
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
-        if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
-            uint64_t process_mem = infos[i].usedGpuMemory;
+        if (process_mem != NVML_VALUE_NOT_AVAILABLE_ULL && process_mem > 0) {
             // Add 5% overhead, then ensure minimum
             uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
             uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;

@@ -198,7 +198,8 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
           }
           proc = find_proc_by_hostpid(actual_pid);
           if (proc != NULL){
-              proc->monitorused[cudadev] = infos[i].usedGpuMemory;
+              // Extract memory value safely - handles struct mismatches where PID is at wrong offset
+              proc->monitorused[cudadev] = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
           }
         }
       }

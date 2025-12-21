@@ -315,3 +315,45 @@ unsigned int extract_pid_safely(void *proc) {
     return 0;  // No valid PID found
 }
 
+/**
+ * Safely extract memory value from nvmlProcessInfo_t when PID is at wrong offset
+ * This handles struct mismatches where PID and memory fields are shifted
+ * 
+ * @param proc Pointer to nvmlProcessInfo_t struct from NVML
+ * @param actual_pid The PID found by extract_pid_safely (may be at wrong offset)
+ * @param header_pid The PID from the header field (infos[i].pid)
+ * @return Memory value in bytes, or 0 if not found
+ */
+uint64_t extract_memory_safely(void *proc, unsigned int actual_pid, unsigned int header_pid) {
+    nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
+    unsigned char *raw = (unsigned char *)proc;
+    
+    // If PID matches header and is valid, struct layout is correct - use standard field
+    if (actual_pid == header_pid && header_pid != 0 && header_pid != 0xffffffff) {
+        return info->usedGpuMemory;
+    }
+    
+    // Struct mismatch detected - PID is at wrong offset, so memory is probably at wrong offset too
+    // Standard layout: offset 0=version, 4=pid, 8=usedGpuMemory
+    // When PID is at offset 0: memory might be at 4, 8, or 12
+    // When PID is at offset 8: memory might be at 12, 16, or 20
+    // Memory values are typically > 1MB (1048576 bytes) and < 100GB (107374182400 bytes)
+    
+    // Try common offsets for memory (8, 12, 16, 20 bytes from start)
+    for (int offset = 8; offset <= 20; offset += 4) {
+        uint64_t candidate = *(uint64_t*)(raw + offset);
+        // Memory values are typically > 1MB and reasonable (< 100GB per process)
+        if (candidate > 1048576 && candidate < 107374182400ULL) {
+            // Additional validation: if PID is at offset 8, memory should be after it
+            // If PID is at offset 0, memory could be at 4, 8, or 12
+            // Skip if candidate equals the PID (we're reading PID instead of memory)
+            if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
+                return candidate;
+            }
+        }
+    }
+    
+    // Fallback: try standard field anyway (might work in some cases)
+    return info->usedGpuMemory;
+}
+
