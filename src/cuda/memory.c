@@ -272,7 +272,6 @@ CUresult cuPointerGetAttributes ( unsigned int  numAttributes, CUpointer_attribu
     for (cur=0;cur<numAttributes;cur++){
         if (attributes[cur]==CU_POINTER_ATTRIBUTE_MEMORY_TYPE){
             int j = check_memory_type(ptr);
-            //*(int *)(data[cur])=1;
             LOG_DEBUG("check result = %d %d",j,*(int *)(data[cur]));
         }else{
             if (attributes[cur]==CU_POINTER_ATTRIBUTE_IS_MANAGED){
@@ -645,7 +644,6 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
         return CUDA_SUCCESS;
     }
     CUresult res = free_raw_async(dptr,hStream);
-    //CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFreeAsync,dptr,hStream); 
     LOG_DEBUG("after free_raw_async dptr=%p res=%d",(void *)dptr,res);
     return res;
 }

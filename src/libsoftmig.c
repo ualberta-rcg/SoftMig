@@ -214,8 +214,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuInit);
     DLSYM_HOOK_FUNC(cuGetProcAddress);
     DLSYM_HOOK_FUNC(cuGetProcAddress_v2);
-    //Context
-    //DLSYM_HOOK_FUNC(cuCtxGetDevice);
     DLSYM_HOOK_FUNC(cuCtxCreate_v2);
     DLSYM_HOOK_FUNC(cuCtxCreate_v3);
     DLSYM_HOOK_FUNC(cuDevicePrimaryCtxGetState);
@@ -947,7 +945,6 @@ void postInit(){
         pidfound=1;
     }
 
-    //add_gpu_device_memory_usage(getpid(),0,context_size,0);
     env_utilization_switch = set_env_utilization_switch();
     init_utilization_watcher();
 }

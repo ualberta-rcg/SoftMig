@@ -12,7 +12,6 @@
 
 #include "include/log_utils.h"
 #include "static_config.h"
-//#include "memory_limit.h"
 
 #define ENSURE_INITIALIZED() ensure_initialized();        \
 
