@@ -73,7 +73,12 @@ extern "C" {
 
 typedef struct nvmlDevice_st *nvmlDevice_t;
 
+// Version constants for nvmlProcessInfo_t
+#define nvmlProcessInfo_v1 1
+#define nvmlProcessInfo_v2 2
+
 typedef struct nvmlProcessInfo_st {
+  unsigned int version;              //!< Structure format version (must be set before API calls)
   unsigned int pid;                  //!< Process ID
   unsigned long long usedGpuMemory;  //!< Amount of used GPU memory in bytes.
   //! Under WDDM, \ref NVML_VALUE_NOT_AVAILABLE is always reported

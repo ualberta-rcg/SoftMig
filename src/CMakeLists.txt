@@ -16,6 +16,10 @@ add_subdirectory(nvml)
 set(LIBSOFTMIG softmig)
 add_library(${LIBSOFTMIG} SHARED libsoftmig.c utils.c log_file.c $<TARGET_OBJECTS:nvml_mod> $<TARGET_OBJECTS:cuda_mod> $<TARGET_OBJECTS:allocator_mod> $<TARGET_OBJECTS:multiprocess_mod>)
 target_compile_options(${LIBSOFTMIG} PUBLIC ${LIBRARY_COMPILE_FLAGS})
+# Note: We link against -lnvidia-ml, but at runtime the code loads the driver's NVML library
+# (libnvidia-ml.so.1) directly via dlopen in hook.c to ensure compatibility with the installed driver.
+# The struct version fields are initialized before all NVML calls to handle version mismatches
+# between CUDA toolkit NVML and driver NVML (e.g., CUDA 12.2 vs driver 570.195.03).
 target_link_libraries(${LIBSOFTMIG} PUBLIC -lcuda -lnvidia-ml)
 
 if (NOT CMAKE_BUILD_TYPE STREQUAL "Debug")

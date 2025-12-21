@@ -154,6 +154,12 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
       nvmlDevice_t device;
       CHECK_NVML_API(nvmlDeviceGetHandleByIndex(cudadev, &device));
 
+      // CRITICAL: Initialize version field for all structs before calling NVML
+      // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+      for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
+          infos[j].version = nvmlProcessInfo_v2;
+      }
+
       //Get Memory for container
       nvmlReturn_t res = nvmlDeviceGetComputeRunningProcesses(device,&infcount,infos);
       if (res == NVML_ERROR_INSUFFICIENT_SIZE) {

@@ -278,6 +278,12 @@ int active_oom_killer() {
         unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
         nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
         
+        // CRITICAL: Initialize version field for all structs before calling NVML
+        // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+        for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
+            infos[j].version = nvmlProcessInfo_v2;
+        }
+        
         if (nvml_library_entry != NULL) {
             // Bypass hook to get ALL processes directly from NVML
             ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
@@ -291,6 +297,10 @@ int active_oom_killer() {
         if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
             LOG_WARN("active_oom_killer: Buffer too small, retrying with larger buffer");
             process_count = SHARED_REGION_MAX_PROCESS_NUM;
+            // Re-initialize version fields before retry
+            for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
+                infos[j].version = nvmlProcessInfo_v2;
+            }
             if (nvml_library_entry != NULL) {
                 ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
                                                 device, &process_count, infos);
@@ -577,6 +587,12 @@ int gradual_oom_killer(int cuda_dev) {
     unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
     nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
     
+    // CRITICAL: Initialize version field for all structs before calling NVML
+    // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+    for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
+        infos[j].version = nvmlProcessInfo_v2;
+    }
+    
     if (nvml_library_entry != NULL) {
         ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
                                         device, &process_count, infos);
@@ -833,6 +849,13 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     
     unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
     nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    
+    // CRITICAL: Initialize version field for all structs before calling NVML
+    // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+    for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
+        infos[j].version = nvmlProcessInfo_v2;
+    }
+    
     ret = nvmlDeviceGetComputeRunningProcesses(ndev, &process_count, infos);
     
     if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {

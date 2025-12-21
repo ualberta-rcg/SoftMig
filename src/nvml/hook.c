@@ -356,6 +356,14 @@ void nvml_postInit() {
     init_device_info();
 }
 
+// Helper function to initialize nvmlProcessInfo_t structs with proper version
+// This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+static inline void init_nvml_process_info_structs(nvmlProcessInfo_t *infos, unsigned int count, unsigned int version) {
+    for (unsigned int i = 0; i < count; i++) {
+        infos[i].version = version;
+    }
+}
+
 // Sum memory usage directly from NVML by querying running processes
 // This is more accurate than tracking allocations ourselves
 // Made non-static so it can be used for enforcement checks too
@@ -363,6 +371,10 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
     // Use nvmlProcessInfo_t from nvml-subset.h (standard type)
     nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    
+    // CRITICAL: Initialize version field for all structs before calling NVML
+    // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+    init_nvml_process_info_structs(infos, SHARED_REGION_MAX_PROCESS_NUM, nvmlProcessInfo_v2);
     
     // Get the real NVML function (bypass our hook to avoid recursion)
     // Note: nvmlDeviceGetComputeRunningProcesses is mapped to _v2 via prefix header

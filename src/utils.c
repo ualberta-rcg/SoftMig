@@ -221,6 +221,11 @@ nvmlReturn_t set_task_pid() {
             continue;
         }
         CHECK_NVML_API(nvmlDeviceGetHandleByIndex(i, &device));
+        // CRITICAL: Initialize version field for all structs before calling NVML
+        // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+        for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
+            tmp_pids_on_device[j].version = nvmlProcessInfo_v2;
+        }
         do{
             // Bypass our filtering hook - call real NVML function directly to get ALL processes
             // This is needed for PID detection to work correctly
@@ -252,6 +257,11 @@ nvmlReturn_t set_task_pid() {
             continue;
         }
         CHECK_NVML_API(nvmlDeviceGetHandleByIndex (i, &device)); 
+        // CRITICAL: Initialize version field for all structs before calling NVML
+        // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+        for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
+            tmp_pids_on_device[j].version = nvmlProcessInfo_v2;
+        }
         do{
             // Bypass our filtering hook - call real NVML function directly to get ALL processes
             // This is needed for PID detection to work correctly

@@ -1548,9 +1548,31 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
   nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
   unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
   
+  // CRITICAL: Initialize version field for all structs before calling NVML
+  // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
+  // Try v2 first (newer format)
+  for (unsigned int i = 0; i < SHARED_REGION_MAX_PROCESS_NUM; i++) {
+    all_infos[i].version = nvmlProcessInfo_v2;
+  }
+  
   nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
                          nvmlDeviceGetComputeRunningProcesses_v2, device,
                          &temp_count, all_infos);
+  
+  // If v2 fails with invalid argument, try v1 as fallback (for older drivers)
+  if (ret == NVML_ERROR_INVALID_ARGUMENT) {
+    LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: v2 failed, trying v1 fallback");
+    temp_count = SHARED_REGION_MAX_PROCESS_NUM;
+    for (unsigned int i = 0; i < SHARED_REGION_MAX_PROCESS_NUM; i++) {
+      all_infos[i].version = nvmlProcessInfo_v1;
+    }
+    ret = NVML_OVERRIDE_CALL(nvml_library_entry,
+                           nvmlDeviceGetComputeRunningProcesses_v2, device,
+                           &temp_count, all_infos);
+    if (ret == NVML_SUCCESS || ret == NVML_ERROR_INSUFFICIENT_SIZE) {
+      LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: v1 fallback succeeded");
+    }
+  }
   
   // Log if we didn't get the full process list
   if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
