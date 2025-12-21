@@ -1603,7 +1603,6 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     
     // Only log first process as sample
     if (temp_count > 0) {
-      unsigned char *raw_bytes = (unsigned char *)&all_infos[0];
       unsigned int safe_pid = extract_pid_safely((void *)&all_infos[0]);
       
       // Log struct fields as interpreted by headers
