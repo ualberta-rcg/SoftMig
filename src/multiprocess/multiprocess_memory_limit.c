@@ -865,15 +865,28 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
     uid_t current_uid = getuid();
     
     // Sum up memory from all processes belonging to current SLURM job (or current user if not in SLURM)
+    unsigned int included_count = 0;
+    unsigned int skipped_count = 0;
+    unsigned int pid_extract_failed = 0;
+    
+    LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Starting - process_count=%u current_uid=%u current_pid=%d", 
+                   process_count, current_uid, getpid());
+    
     for (unsigned int i = 0; i < process_count; i++) {
         // CRITICAL: Use safe PID extraction to handle struct mismatches
         unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
         if (actual_pid == 0) {
+            pid_extract_failed++;
+            LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] - could not extract PID (header pid=%u), skipping", 
+                         i, infos[i].pid);
             continue;  // Skip if we can't get a valid PID
         }
         
         // First try to check if process belongs to current cgroup session
         int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
+        
+        LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - cgroup_check=%d memory=%llu", 
+                     i, actual_pid, cgroup_check, (unsigned long long)infos[i].usedGpuMemory);
         
         if (cgroup_check == -1) {
             // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
@@ -883,14 +896,22 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
                 // Couldn't read UID - skip this process to avoid blocking on shared region lock
                 LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - could not read UID, skipping", 
                          i, actual_pid);
+                skipped_count++;
                 continue;
             } else if (proc_uid != current_uid) {
+                LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - UID %u != current UID %u, skipping", 
+                             i, actual_pid, proc_uid, current_uid);
+                skipped_count++;
                 continue;
             }
         } else if (cgroup_check == 0) {
             // Process is in a different cgroup session - skip it
+            LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - different cgroup (check=%d), skipping", 
+                         i, actual_pid, cgroup_check);
+            skipped_count++;
             continue;
         }
+        // cgroup_check == 1 means process belongs to current cgroup session - include it
         
         // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (infos[i].usedGpuMemory != NVML_VALUE_NOT_AVAILABLE_ULL && infos[i].usedGpuMemory > 0) {
@@ -899,11 +920,24 @@ uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
             uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
             uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
             total_usage += process_mem_counted;
+            included_count++;
+            LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - INCLUDED: memory=%llu bytes (%.2f GB), total_usage now=%llu bytes (%.2f GB)", 
+                         i, actual_pid, (unsigned long long)process_mem, 
+                         process_mem / (1024.0 * 1024.0 * 1024.0),
+                         (unsigned long long)total_usage,
+                         total_usage / (1024.0 * 1024.0 * 1024.0));
         } else {
             // Even if NVML reports 0 or unavailable, count minimum for the process
             total_usage += MIN_PROCESS_MEMORY;
+            included_count++;
+            LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - INCLUDED (min memory): memory=%llu (invalid/unavailable), total_usage now=%llu bytes", 
+                         i, actual_pid, (unsigned long long)infos[i].usedGpuMemory, (unsigned long long)total_usage);
         }
     }
+    
+    LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Final - included=%u skipped=%u pid_extract_failed=%u total_usage=%llu bytes (%.2f GB)", 
+                  included_count, skipped_count, pid_extract_failed, (unsigned long long)total_usage, 
+                  total_usage / (1024.0 * 1024.0 * 1024.0));
     
     return total_usage;
 }
