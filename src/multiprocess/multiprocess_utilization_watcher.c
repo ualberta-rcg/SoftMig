@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <errno.h>
 #include <stddef.h>
 #include <semaphore.h>
@@ -14,8 +15,8 @@
 
 #include <cuda.h>
 #include "include/nvml_prefix.h"
-// Include nvml-subset.h before system nvml.h to get our versioned struct definitions
-#include "include/nvml-subset.h"
+// Note: We use system <nvml.h> here to avoid conflicts with nvml-subset.h
+// The nvml_prefix.h maps nvmlDeviceGetComputeRunningProcesses to _v2 version
 #include <nvml.h>
 #include <sys/time.h>
 #include <sys/wait.h>
@@ -24,6 +25,16 @@
 #include "multiprocess/multiprocess_utilization_watcher.h"
 #include "include/log_utils.h"
 #include "include/nvml_override.h"
+
+// Local versioned struct definition to avoid including nvml-subset.h (which conflicts with system nvml.h)
+// This matches the v2 struct layout expected by the driver NVML library
+#define NVML_PROCESS_INFO_V1 1
+#define NVML_PROCESS_INFO_V2 2
+typedef struct {
+    unsigned int version;              //!< Structure format version (must be set before API calls)
+    unsigned int pid;                  //!< Process ID
+    unsigned long long usedGpuMemory;  //!< Amount of used GPU memory in bytes
+} nvmlProcessInfo_v2_local_t;
 
 
 static int g_sm_num;
@@ -138,9 +149,9 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
 
     int i;
     unsigned int infcount;
-    // Use nvmlProcessInfo_t (which has version field) instead of nvmlProcessInfo_v1_t
-    // to ensure compatibility with driver NVML struct layout
-    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    // Use local versioned struct that's compatible with driver NVML v2 API
+    // This avoids conflicts between nvml-subset.h and system nvml.h
+    nvmlProcessInfo_v2_local_t infos[SHARED_REGION_MAX_PROCESS_NUM];
 
     unsigned int nvmlCounts;
     CHECK_NVML_API(nvmlDeviceGetCount(&nvmlCounts));
@@ -161,11 +172,16 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
       // CRITICAL: Initialize version field for all structs before calling NVML
       // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
       for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
-          infos[j].version = nvmlProcessInfo_v2;
+          infos[j].version = NVML_PROCESS_INFO_V2;
+          infos[j].pid = 0;
+          infos[j].usedGpuMemory = 0;
       }
 
       //Get Memory for container
-      nvmlReturn_t res = nvmlDeviceGetComputeRunningProcesses(device,&infcount,infos);
+      // Note: This goes through our hook (nvmlDeviceGetComputeRunningProcesses_v2) which expects versioned structs.
+      // Cast to match system header signature - the memory layout is compatible since v2 struct
+      // is just v1 struct with a version field prepended: {version, pid, usedGpuMemory}
+      nvmlReturn_t res = nvmlDeviceGetComputeRunningProcesses(device,&infcount,(nvmlProcessInfo_v1_t *)infos);
       if (res == NVML_ERROR_INSUFFICIENT_SIZE) {
         LOG_WARN("get_used_gpu_utilization: Device %d - Buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.", 
                  cudadev, infcount, SHARED_REGION_MAX_PROCESS_NUM);
