@@ -1,7 +1,6 @@
 #ifndef __LOG_UTILS_H__
 #define __LOG_UTILS_H__
 
-#include <libgen.h>
 #include <assert.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -128,18 +127,25 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
     va_list args;
     va_start(args, msg);
     
-    // Thread-safe basename: copy __FILE__ first since basename() may modify its argument
-    // Use local buffer (thread-safe since each thread has its own stack)
-    char file_buf[256];
+    // Extract filename from __FILE__ without using basename() to avoid thread-safety issues
     const char* file_name = __FILE__;
-    if (strlen(file_name) < sizeof(file_buf)) {
-        strncpy(file_buf, file_name, sizeof(file_buf) - 1);
-        file_buf[sizeof(file_buf) - 1] = '\0';
-        file_name = basename(file_buf);
-    } else {
-        // Fallback if path is too long - just use last component manually
-        const char* last_slash = strrchr(file_name, '/');
-        file_name = (last_slash != NULL) ? (last_slash + 1) : file_name;
+    const char* last_slash = strrchr(file_name, '/');
+    if (last_slash != NULL) {
+        file_name = last_slash + 1;
+    }
+    const char* last_backslash = strrchr(file_name, '\\');
+    if (last_backslash != NULL) {
+        file_name = last_backslash + 1;
+    }
+    
+    // Check if console logging is needed BEFORE using va_list
+    int log_level = get_log_level();
+    int need_console = (log_level >= 2);
+    
+    // Copy va_list BEFORE first use if console logging is needed
+    va_list args_console;
+    if (need_console) {
+        va_copy(args_console, args);
     }
     
     // Always log to file
@@ -155,15 +161,11 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
     }
     
     // Console logging for debug mode (level >= 2)
-    int log_level = get_log_level();
-    if (log_level >= 2) {
-        // CRITICAL: va_list cannot be reused after vfprintf - must use va_copy
-        va_list args2;
-        va_copy(args2, args);
+    if (need_console) {
         fprintf(stderr, "[softmig %s]: ", prefix);
-        vfprintf(stderr, msg, args2);
+        vfprintf(stderr, msg, args_console);
         fprintf(stderr, "\n");
-        va_end(args2);
+        va_end(args_console);
     }
     
     va_end(args);
