@@ -508,7 +508,7 @@ static int kill_current_cgroup(void) {
     snprintf(cgroup_procs_file, sizeof(cgroup_procs_file), 
              "/sys/fs/cgroup/%s/cgroup.procs", cgroup_path);
     
-    FILE* fp = fopen(cgroup_procs_file, "r");
+    fp = fopen(cgroup_procs_file, "r");
     if (fp != NULL) {
         pid_t pid;
         int killed = 0;

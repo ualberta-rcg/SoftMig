@@ -309,7 +309,7 @@ void* utilization_watcher() {
                             
                             char cmd[1024];
                             snprintf(cmd, sizeof(cmd), "logger -t softmig '%s'", syslog_msg);
-                            system(cmd);
+                            (void)system(cmd);  // Ignore return value - logging failure is non-critical
                             LOG_ERROR("OOM syslog: %s", syslog_msg);
                             
                             // Trigger gradual OOM killer
