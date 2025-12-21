@@ -34,9 +34,6 @@ typedef nvmlReturn_t (*driver_sym_t)();
 #define NVML_OVERRIDE_CALL(table, sym, ...)                                    \
   ({                                                                           \
     driver_sym_t _entry = NVML_FIND_ENTRY(table, sym);                         \
-    if (_entry == NULL) {                                                      \
-      LOG_ERROR("Function %s not found in NVML library - symbol lookup failed", #sym); \
-    }                                                                          \
     _entry == NULL ? NVML_ERROR_FUNCTION_NOT_FOUND : _entry(__VA_ARGS__);      \
   })
 
