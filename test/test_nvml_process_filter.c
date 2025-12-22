@@ -22,10 +22,8 @@
 // Number of child processes to spawn for multi-process test
 #define NUM_CHILD_PROCESSES 3
 
-// Function pointer types for raw NVML calls
-typedef nvmlReturn_t (*nvmlInit_v2_fn)(void);
-typedef nvmlReturn_t (*nvmlDeviceGetHandleByIndex_v2_fn)(unsigned int index, nvmlDevice_t *device);
-typedef nvmlReturn_t (*nvmlDeviceGetComputeRunningProcesses_v2_fn)(
+// Function pointer type for raw NVML calls (for dlsym)
+typedef nvmlReturn_t (*nvmlDeviceGetComputeRunningProcesses_fn)(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos);
 
 // Get current process PID
@@ -51,12 +49,8 @@ static int wait_for_process_in_list(nvmlDevice_t device, pid_t current_pid,
     
     do {
         *count = MAX_PROCESSES;
-        // Initialize version field for all structs
-        for (unsigned int i = 0; i < MAX_PROCESSES; i++) {
-            infos[i].version = nvmlProcessInfo_v2;
-        }
         
-        nvmlReturn_t ret = nvmlDeviceGetComputeRunningProcesses_v2(device, count, infos);
+        nvmlReturn_t ret = nvmlDeviceGetComputeRunningProcesses(device, count, infos);
         
         if (ret == NVML_SUCCESS || ret == NVML_ERROR_INSUFFICIENT_SIZE) {
             if (pid_in_list(current_pid, infos, *count)) {
@@ -82,23 +76,18 @@ static int query_raw_nvml_processes(nvmlDevice_t device,
         return 0;
     }
     
-    // Get function pointers
-    nvmlDeviceGetComputeRunningProcesses_v2_fn raw_get_processes = 
-        (nvmlDeviceGetComputeRunningProcesses_v2_fn)dlsym(nvml_handle, 
-                                                          "nvmlDeviceGetComputeRunningProcesses_v2");
+    // Get the function pointer for nvmlDeviceGetComputeRunningProcesses
+    nvmlDeviceGetComputeRunningProcesses_fn raw_get_processes = 
+        (nvmlDeviceGetComputeRunningProcesses_fn)dlsym(nvml_handle, 
+                                                       "nvmlDeviceGetComputeRunningProcesses");
     
     if (!raw_get_processes) {
-        fprintf(stderr, "Warning: Could not dlsym nvmlDeviceGetComputeRunningProcesses_v2: %s\n", dlerror());
+        fprintf(stderr, "Warning: Could not dlsym nvmlDeviceGetComputeRunningProcesses: %s\n", dlerror());
         dlclose(nvml_handle);
         return 0;
     }
     
-    // Initialize version field for all structs
     *raw_count = MAX_PROCESSES;
-    for (unsigned int i = 0; i < MAX_PROCESSES; i++) {
-        raw_infos[i].version = nvmlProcessInfo_v2;
-    }
-    
     nvmlReturn_t ret = raw_get_processes(device, raw_count, raw_infos);
     
     dlclose(nvml_handle);
@@ -124,12 +113,8 @@ static int wait_for_multiple_processes_in_list(nvmlDevice_t device, pid_t *pids,
     
     do {
         *count = MAX_PROCESSES;
-        // Initialize version field for all structs
-        for (unsigned int i = 0; i < MAX_PROCESSES; i++) {
-            infos[i].version = nvmlProcessInfo_v2;
-        }
         
-        nvmlReturn_t ret = nvmlDeviceGetComputeRunningProcesses_v2(device, count, infos);
+        nvmlReturn_t ret = nvmlDeviceGetComputeRunningProcesses(device, count, infos);
         
         if (ret == NVML_SUCCESS || ret == NVML_ERROR_INSUFFICIENT_SIZE) {
             found_count = 0;
@@ -170,7 +155,7 @@ static void child_process_gpu_worker(size_t alloc_size) {
     
     // Initialize CUDA
     ret = cudaFree(0);
-    if (ret != cudaSuccess && ret != cudaErrorCudaNotReady) {
+    if (ret != cudaSuccess) {
         fprintf(stderr, "Child PID %d: cudaFree(0) failed: %d\n", getpid(), ret);
         exit(1);
     }
@@ -322,7 +307,7 @@ int main(int argc, char **argv) {
     // Initialize CUDA to make this process visible to NVML
     printf("Initializing CUDA context...\n");
     cudaError_t cuda_ret = cudaFree(0); // Initialize CUDA runtime
-    if (cuda_ret != cudaSuccess && cuda_ret != cudaErrorCudaNotReady) {
+    if (cuda_ret != cudaSuccess) {
         fprintf(stderr, "WARNING: cudaFree(0) failed: %d\n", cuda_ret);
     }
     
