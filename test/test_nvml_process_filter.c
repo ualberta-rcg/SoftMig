@@ -46,16 +46,40 @@ static int wait_for_process_in_list(nvmlDevice_t device, pid_t current_pid,
                                      nvmlProcessInfo_t *infos, unsigned int *count) {
     time_t start_time = time(NULL);
     time_t current_time;
+    int attempt = 0;
+    
+    printf("  DEBUG: Looking for PID %d in NVML process list...\n", current_pid);
     
     do {
         *count = MAX_PROCESSES;
         
         nvmlReturn_t ret = nvmlDeviceGetComputeRunningProcesses(device, count, infos);
+        attempt++;
+        
+        printf("  DEBUG: Attempt %d: nvmlDeviceGetComputeRunningProcesses returned %d, found %u processes\n",
+               attempt, ret, *count);
         
         if (ret == NVML_SUCCESS || ret == NVML_ERROR_INSUFFICIENT_SIZE) {
-            if (pid_in_list(current_pid, infos, *count)) {
-                return 1; // Found!
+            // Print all PIDs found
+            printf("  DEBUG: PIDs in NVML list: ");
+            for (unsigned int i = 0; i < *count; i++) {
+                printf("%u", infos[i].pid);
+                if (infos[i].pid == current_pid) {
+                    printf("(TARGET!)");
+                }
+                printf(" [mem: %llu bytes]", (unsigned long long)infos[i].usedGpuMemory);
+                if (i < *count - 1) printf(", ");
             }
+            printf("\n");
+            
+            if (pid_in_list(current_pid, infos, *count)) {
+                printf("  DEBUG: ✓ Found target PID %d in NVML list!\n", current_pid);
+                return 1; // Found!
+            } else {
+                printf("  DEBUG: Target PID %d NOT in list, retrying...\n", current_pid);
+            }
+        } else {
+            printf("  DEBUG: NVML query failed with error %d, retrying...\n", ret);
         }
         
         // Sleep briefly before retry
@@ -64,38 +88,49 @@ static int wait_for_process_in_list(nvmlDevice_t device, pid_t current_pid,
         current_time = time(NULL);
     } while ((current_time - start_time) < RETRY_TIMEOUT_SEC);
     
+    printf("  DEBUG: Timeout after %d attempts - target PID %d not found\n", 
+           attempt, current_pid);
     return 0; // Timeout
 }
 
 // Query raw NVML driver (bypassing SoftMig interposition) via dlopen/dlsym
 static int query_raw_nvml_processes(nvmlDevice_t device, 
                                      nvmlProcessInfo_t *raw_infos, unsigned int *raw_count) {
+    printf("  DEBUG: Attempting to dlopen libnvidia-ml.so.1...\n");
     void *nvml_handle = dlopen("libnvidia-ml.so.1", RTLD_LAZY | RTLD_LOCAL);
     if (!nvml_handle) {
-        fprintf(stderr, "Warning: Could not dlopen libnvidia-ml.so.1: %s\n", dlerror());
+        fprintf(stderr, "  DEBUG: Could not dlopen libnvidia-ml.so.1: %s\n", dlerror());
         return 0;
     }
+    printf("  DEBUG: ✓ Successfully opened libnvidia-ml.so.1\n");
     
     // Get the function pointer for nvmlDeviceGetComputeRunningProcesses
+    printf("  DEBUG: Looking for nvmlDeviceGetComputeRunningProcesses symbol...\n");
     nvmlDeviceGetComputeRunningProcesses_fn raw_get_processes = 
         (nvmlDeviceGetComputeRunningProcesses_fn)dlsym(nvml_handle, 
                                                        "nvmlDeviceGetComputeRunningProcesses");
     
     if (!raw_get_processes) {
-        fprintf(stderr, "Warning: Could not dlsym nvmlDeviceGetComputeRunningProcesses: %s\n", dlerror());
+        fprintf(stderr, "  DEBUG: Could not dlsym nvmlDeviceGetComputeRunningProcesses: %s\n", dlerror());
         dlclose(nvml_handle);
         return 0;
     }
+    printf("  DEBUG: ✓ Found nvmlDeviceGetComputeRunningProcesses function\n");
     
     *raw_count = MAX_PROCESSES;
+    printf("  DEBUG: Calling raw nvmlDeviceGetComputeRunningProcesses (bypassing SoftMig)...\n");
     nvmlReturn_t ret = raw_get_processes(device, raw_count, raw_infos);
+    
+    printf("  DEBUG: Raw NVML call returned: %d, process count: %u\n", ret, *raw_count);
     
     dlclose(nvml_handle);
     
     if (ret == NVML_SUCCESS || ret == NVML_ERROR_INSUFFICIENT_SIZE) {
+        printf("  DEBUG: ✓ Raw NVML query successful\n");
         return 1;
     }
     
+    printf("  DEBUG: Raw NVML query failed with error %d\n", ret);
     return 0;
 }
 
@@ -111,25 +146,65 @@ static int wait_for_multiple_processes_in_list(nvmlDevice_t device, pid_t *pids,
         return 0;
     }
     
+    printf("  DEBUG: Looking for %d PIDs: ", num_pids);
+    for (int i = 0; i < num_pids; i++) {
+        printf("%d%s", pids[i], (i < num_pids - 1) ? ", " : "\n");
+    }
+    
+    int attempt = 0;
     do {
         *count = MAX_PROCESSES;
         
         nvmlReturn_t ret = nvmlDeviceGetComputeRunningProcesses(device, count, infos);
+        attempt++;
+        
+        printf("  DEBUG: Attempt %d: nvmlDeviceGetComputeRunningProcesses returned %d, found %u processes\n",
+               attempt, ret, *count);
         
         if (ret == NVML_SUCCESS || ret == NVML_ERROR_INSUFFICIENT_SIZE) {
+            // Print all PIDs found
+            printf("  DEBUG: PIDs in NVML list: ");
+            for (unsigned int i = 0; i < *count; i++) {
+                printf("%u [mem: %llu bytes]", 
+                       infos[i].pid,
+                       (unsigned long long)infos[i].usedGpuMemory);
+                
+                // Check if this is one of our target PIDs
+                int is_target = 0;
+                for (int j = 0; j < num_pids; j++) {
+                    if (infos[i].pid == pids[j]) {
+                        printf("(TARGET-%d!)", j);
+                        is_target = 1;
+                        break;
+                    }
+                }
+                
+                if (i < *count - 1) printf(", ");
+            }
+            printf("\n");
+            
             found_count = 0;
             // Check which PIDs are found
             for (int i = 0; i < num_pids; i++) {
                 if (!found[i] && pid_in_list(pids[i], infos, *count)) {
                     found[i] = 1;
                     found_count++;
+                    printf("  DEBUG: ✓ Found target PID %d (target %d/%d)\n", 
+                           pids[i], found_count, num_pids);
                 }
             }
             
+            printf("  DEBUG: Found %d/%d target processes so far\n", found_count, num_pids);
+            
             if (found_count == num_pids) {
+                printf("  DEBUG: ✓ All %d target processes found!\n", num_pids);
                 free(found);
                 return 1; // All found!
+            } else {
+                printf("  DEBUG: Still missing %d processes, retrying...\n", num_pids - found_count);
             }
+        } else {
+            printf("  DEBUG: NVML query failed with error %d, retrying...\n", ret);
         }
         
         // Sleep briefly before retry
@@ -139,6 +214,7 @@ static int wait_for_multiple_processes_in_list(nvmlDevice_t device, pid_t *pids,
     } while ((current_time - start_time) < RETRY_TIMEOUT_SEC);
     
     // Print which PIDs were not found
+    printf("  DEBUG: Timeout after %d attempts. Final status:\n", attempt);
     printf("  Found %d/%d processes:\n", found_count, num_pids);
     for (int i = 0; i < num_pids; i++) {
         printf("    PID %d: %s\n", pids[i], found[i] ? "FOUND" : "NOT FOUND");
@@ -153,26 +229,36 @@ static void child_process_gpu_worker(size_t alloc_size) {
     void *gpu_mem = NULL;
     cudaError_t ret;
     
+    printf("  DEBUG: Child PID %d starting, will allocate %zu bytes...\n", 
+           getpid(), alloc_size);
+    
     // Initialize CUDA
+    printf("  DEBUG: Child PID %d initializing CUDA...\n", getpid());
     ret = cudaFree(0);
     if (ret != cudaSuccess) {
-        fprintf(stderr, "Child PID %d: cudaFree(0) failed: %d\n", getpid(), ret);
+        fprintf(stderr, "  DEBUG: Child PID %d: cudaFree(0) failed: %d\n", getpid(), ret);
         exit(1);
     }
+    printf("  DEBUG: Child PID %d: CUDA initialized\n", getpid());
     
     // Allocate GPU memory
+    printf("  DEBUG: Child PID %d allocating %zu bytes...\n", getpid(), alloc_size);
     ret = cudaMalloc(&gpu_mem, alloc_size);
     if (ret != cudaSuccess) {
-        fprintf(stderr, "Child PID %d: cudaMalloc failed: %d\n", getpid(), ret);
+        fprintf(stderr, "  DEBUG: Child PID %d: cudaMalloc(%zu) failed: %d\n", 
+                getpid(), alloc_size, ret);
         exit(1);
     }
     
-    printf("Child PID %d: Allocated %zu bytes on GPU, keeping it allocated...\n", 
+    printf("  DEBUG: ✓ Child PID %d: Successfully allocated %zu bytes at %p\n", 
+           getpid(), alloc_size, gpu_mem);
+    printf("Child PID %d: Allocated %zu bytes on GPU, keeping it allocated for 10 seconds...\n", 
            getpid(), alloc_size);
     
     // Keep the memory allocated and sleep (so process stays visible to NVML)
     sleep(10); // Sleep for 10 seconds
     
+    printf("  DEBUG: Child PID %d: Freeing GPU memory and exiting...\n", getpid());
     // Clean up
     cudaFree(gpu_mem);
     exit(0);
@@ -218,29 +304,52 @@ static void compare_filtered_vs_raw(nvmlProcessInfo_t *filtered_infos, unsigned 
     printf("  Filtered processes: %u\n", filtered_count);
     printf("  Raw processes: %u\n", raw_count);
     
+    printf("\n  DEBUG: Filtered PIDs: ");
+    for (unsigned int i = 0; i < filtered_count; i++) {
+        printf("%u [mem: %llu]%s", 
+               filtered_infos[i].pid,
+               (unsigned long long)filtered_infos[i].usedGpuMemory,
+               (i < filtered_count - 1) ? ", " : "\n");
+    }
+    
+    printf("  DEBUG: Raw PIDs: ");
+    for (unsigned int i = 0; i < raw_count; i++) {
+        printf("%u [mem: %llu]%s", 
+               raw_infos[i].pid,
+               (unsigned long long)raw_infos[i].usedGpuMemory,
+               (i < raw_count - 1) ? ", " : "\n");
+    }
+    
     if (raw_count > filtered_count) {
         printf("  ✓ Filtering detected: %u processes filtered out\n", raw_count - filtered_count);
         
-        // Show which PIDs were filtered
-        printf("  Filtered out PIDs: ");
-        int first = 1;
+        // Show which PIDs were filtered (with details)
+        printf("  Filtered out PIDs:\n");
         for (unsigned int i = 0; i < raw_count; i++) {
             if (!pid_in_list(raw_infos[i].pid, filtered_infos, filtered_count)) {
-                if (!first) printf(", ");
-                printf("%u", raw_infos[i].pid);
-                first = 0;
+                printf("    - PID %u (mem: %llu bytes)\n", 
+                       raw_infos[i].pid,
+                       (unsigned long long)raw_infos[i].usedGpuMemory);
             }
         }
-        printf("\n");
     } else if (raw_count == filtered_count) {
         printf("  Note: No filtering detected (same count)\n");
+    } else {
+        printf("  WARNING: Filtered count (%u) > raw count (%u) - unexpected!\n", 
+               filtered_count, raw_count);
     }
     
     // Verify all filtered PIDs are in raw list
+    int validation_failed = 0;
     for (unsigned int i = 0; i < filtered_count; i++) {
         if (!pid_in_list(filtered_infos[i].pid, raw_infos, raw_count)) {
             fprintf(stderr, "  ERROR: Filtered PID %u not found in raw list!\n", filtered_infos[i].pid);
+            validation_failed = 1;
         }
+    }
+    
+    if (!validation_failed) {
+        printf("  ✓ Validation passed: All filtered PIDs are present in raw list\n");
     }
 }
 
