@@ -663,6 +663,41 @@ export LD_PRELOAD=./libsoftmig.so
 
 **Note**: Tests use `LD_PRELOAD` for development/testing. In production, the library is loaded via `/etc/ld.so.preload`.
 
+### NVML Process Filter Test
+
+The `test_nvml_process_filter` test validates that SoftMig's NVML process filtering is working correctly. It verifies that `nvmlDeviceGetComputeRunningProcesses_v2` returns filtered process lists that include the current process and (optionally) compares filtered output against raw NVML driver output to detect filtering.
+
+```bash
+# Run the NVML process filter test
+cd build/test
+./test_nvml_process_filter
+
+# With SoftMig active (to test interposition)
+export LD_PRELOAD=../libsoftmig.so
+./test_nvml_process_filter
+```
+
+**What it tests:**
+- **Single-process test:**
+  - NVML initialization and device enumeration
+  - Current process visibility in NVML process lists (after creating CUDA context)
+  - SoftMig process filtering (if SoftMig is active via `LD_PRELOAD` or system preload)
+  - Comparison between filtered and raw NVML output (when dlopen/dlsym is available)
+
+- **Multi-process test:**
+  - Spawns 3 child processes that each allocate GPU memory (1MB, 2MB, 3MB)
+  - Verifies that all processes (1 parent + 3 children) appear in NVML process lists
+  - Tests that SoftMig correctly reports multiple processes from the same job/user
+  - Validates that child processes are visible alongside the parent process
+  - Compares multi-process filtered output against raw NVML output
+
+**Behavior:**
+- If no GPU/NVML is available, the test prints `SKIP` and exits successfully (exit code 0)
+- If the current process is not found in the NVML process list, the test fails (exit code 1)
+- If child processes cannot be spawned or are not found in NVML, the test fails (exit code 1)
+- If filtering is detected (raw list has more processes than filtered list), it prints details
+- Child processes are automatically cleaned up after the test (terminated via SIGTERM)
+
 ## nvidia-smi Hook
 
 SoftMig includes a `nvidia-smi-hook.sh` script that filters `nvidia-smi` output to show only processes from the current SLURM job's cgroup. This is useful when multiple jobs share a GPU - each job will only see its own processes.
