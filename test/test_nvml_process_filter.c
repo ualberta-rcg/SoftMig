@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <time.h>
+#include <errno.h>
+#include <limits.h>
 #include <cuda_runtime.h>
 #include <nvml.h>
 #include <assert.h>
@@ -21,6 +23,9 @@
 
 // Number of child processes to spawn for multi-process test
 #define NUM_CHILD_PROCESSES 3
+
+// Child mode argv[1] marker
+#define CHILD_MODE_ARG "--child"
 
 // Function pointer type for raw NVML calls (for dlsym)
 typedef nvmlReturn_t (*nvmlDeviceGetComputeRunningProcesses_fn)(
@@ -225,7 +230,7 @@ static int wait_for_multiple_processes_in_list(nvmlDevice_t device, pid_t *pids,
 }
 
 // Child process function: allocate GPU memory and keep it allocated
-static void child_process_gpu_worker(size_t alloc_size) {
+static void child_process_gpu_worker(int device_id, size_t alloc_size) {
     void *gpu_mem = NULL;
     cudaError_t ret;
     
@@ -234,6 +239,12 @@ static void child_process_gpu_worker(size_t alloc_size) {
     
     // Initialize CUDA
     printf("  DEBUG: Child PID %d initializing CUDA...\n", getpid());
+    ret = cudaSetDevice(device_id);
+    if (ret != cudaSuccess) {
+        fprintf(stderr, "  DEBUG: Child PID %d: cudaSetDevice(%d) failed: %d\n",
+                getpid(), device_id, ret);
+        exit(1);
+    }
     ret = cudaFree(0);
     if (ret != cudaSuccess) {
         fprintf(stderr, "  DEBUG: Child PID %d: cudaFree(0) failed: %d\n", getpid(), ret);
@@ -247,6 +258,18 @@ static void child_process_gpu_worker(size_t alloc_size) {
     if (ret != cudaSuccess) {
         fprintf(stderr, "  DEBUG: Child PID %d: cudaMalloc(%zu) failed: %d\n", 
                 getpid(), alloc_size, ret);
+        exit(1);
+    }
+    // Touch the allocation to make GPU usage unambiguous
+    ret = cudaMemset(gpu_mem, 0, alloc_size);
+    if (ret != cudaSuccess) {
+        fprintf(stderr, "  DEBUG: Child PID %d: cudaMemset(%p, 0, %zu) failed: %d\n",
+                getpid(), gpu_mem, alloc_size, ret);
+        exit(1);
+    }
+    ret = cudaDeviceSynchronize();
+    if (ret != cudaSuccess) {
+        fprintf(stderr, "  DEBUG: Child PID %d: cudaDeviceSynchronize failed: %d\n", getpid(), ret);
         exit(1);
     }
     
@@ -264,8 +287,43 @@ static void child_process_gpu_worker(size_t alloc_size) {
     exit(0);
 }
 
+static int is_child_mode(int argc, char **argv) {
+    return (argc >= 4 && argv[1] && strcmp(argv[1], CHILD_MODE_ARG) == 0);
+}
+
+static int parse_int_arg(const char *s, int *out) {
+    char *end = NULL;
+    errno = 0;
+    long v = strtol(s, &end, 10);
+    if (errno != 0 || !end || *end != '\0') return 0;
+    if (v < INT_MIN || v > INT_MAX) return 0;
+    *out = (int)v;
+    return 1;
+}
+
+static int parse_size_arg(const char *s, size_t *out) {
+    char *end = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &end, 10);
+    if (errno != 0 || !end || *end != '\0') return 0;
+    *out = (size_t)v;
+    return 1;
+}
+
+static const char *get_self_exe_path(char *buf, size_t buf_len, const char *argv0) {
+    if (buf && buf_len > 0) {
+        ssize_t n = readlink("/proc/self/exe", buf, buf_len - 1);
+        if (n > 0) {
+            buf[n] = '\0';
+            return buf;
+        }
+    }
+    // Fallback: argv[0] (may be relative, but usually works)
+    return argv0 ? argv0 : "./test_nvml_process_filter";
+}
+
 // Spawn a child process that uses the GPU
-static pid_t spawn_gpu_child_process(size_t alloc_size) {
+static pid_t spawn_gpu_child_process(const char *self_exe, int device_id, size_t alloc_size) {
     pid_t pid = fork();
     
     if (pid < 0) {
@@ -274,10 +332,16 @@ static pid_t spawn_gpu_child_process(size_t alloc_size) {
     }
     
     if (pid == 0) {
-        // Child process
-        child_process_gpu_worker(alloc_size);
-        // Should not reach here
-        exit(1);
+        // Child process: exec a fresh instance to avoid CUDA runtime fork issues
+        char dev_str[32];
+        char size_str[32];
+        (void)snprintf(dev_str, sizeof(dev_str), "%d", device_id);
+        (void)snprintf(size_str, sizeof(size_str), "%zu", alloc_size);
+
+        execl(self_exe, self_exe, CHILD_MODE_ARG, dev_str, size_str, (char *)NULL);
+        // If exec fails, report and exit
+        fprintf(stderr, "ERROR: execl(%s) failed in child: %s\n", self_exe, strerror(errno));
+        _exit(127);
     }
     
     // Parent process
@@ -354,6 +418,23 @@ static void compare_filtered_vs_raw(nvmlProcessInfo_t *filtered_infos, unsigned 
 }
 
 int main(int argc, char **argv) {
+    // Child mode: just do GPU work and exit. Must happen before NVML/CUDA init in parent path.
+    if (is_child_mode(argc, argv)) {
+        // Make stdout/stderr unbuffered so the parent sees logs quickly.
+        setvbuf(stdout, NULL, _IONBF, 0);
+        setvbuf(stderr, NULL, _IONBF, 0);
+
+        int device_id = 0;
+        size_t alloc_size = 0;
+        if (!parse_int_arg(argv[2], &device_id) || !parse_size_arg(argv[3], &alloc_size)) {
+            fprintf(stderr, "ERROR: Invalid child args. Usage: %s %s <device_id> <alloc_bytes>\n",
+                    argv[0], CHILD_MODE_ARG);
+            return 2;
+        }
+        child_process_gpu_worker(device_id, alloc_size);
+        return 0; // Not reached
+    }
+
     pid_t current_pid = get_current_pid();
     nvmlReturn_t ret;
     unsigned int device_count = 0;
@@ -473,11 +554,14 @@ int main(int argc, char **argv) {
     
     pid_t child_pids[NUM_CHILD_PROCESSES];
     int all_children_spawned = 1;
+
+    char self_exe_buf[PATH_MAX];
+    const char *self_exe = get_self_exe_path(self_exe_buf, sizeof(self_exe_buf), argv[0]);
     
     // Spawn child processes
     for (int i = 0; i < NUM_CHILD_PROCESSES; i++) {
         size_t alloc_size = (1 + i) * 1024 * 1024; // 1MB, 2MB, 3MB, etc.
-        child_pids[i] = spawn_gpu_child_process(alloc_size);
+        child_pids[i] = spawn_gpu_child_process(self_exe, TEST_DEVICE_ID, alloc_size);
         if (child_pids[i] < 0) {
             fprintf(stderr, "ERROR: Failed to spawn child process %d\n", i);
             all_children_spawned = 0;
