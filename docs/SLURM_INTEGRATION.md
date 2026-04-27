@@ -23,9 +23,15 @@ Example scripts are provided in `docs/examples/`:
 | `/etc/ld.so.preload` | system-wide load of `libsoftmig.so` |
 | `/var/run/softmig/{jobid}.conf` | per-job limit config (root-owned) |
 | `/var/run/softmig/{jobid}_{arrayid}.conf` | per-array-task config (root-owned) |
-| `$SLURM_TMPDIR/cudevshr.cache.*` | per-job shared state for memory tracking |
-| `$SLURM_TMPDIR/vgpulock/` | per-job lock files |
-| `/var/log/softmig/{jobid}.log` | per-job logs (admin-visible) |
+| `$SLURM_TMPDIR/cudevshr.cache.{jobid}[.{arrayid}]` | per-job shared memory region for memory tracking |
+| `$SLURM_TMPDIR/vgpulock/lock.{jobid}` | per-job serialization lock file |
+| `/var/log/softmig/{jobid}.log` or `{jobid}_{arrayid}.log` | per-job logs (admin-visible) |
+
+Notes:
+
+- If `SLURM_TMPDIR` is not set, cache and lock files fall back to `/tmp`.
+- Lock files are keyed by job ID only (array tasks within the same job share one lock).
+- Log files include the array task ID when `SLURM_ARRAY_TASK_ID` is set. If `/var/log/softmig/` is not writable, logs fall back to `$SLURM_TMPDIR/softmig_{jobid}.log`.
 
 ## Config source of truth
 
@@ -39,7 +45,7 @@ The prolog should:
 
 - detect the requested slice/shard count (site-specific)
 - compute `CUDA_DEVICE_MEMORY_LIMIT` and `CUDA_DEVICE_SM_LIMIT`
-- write config file(s) as root:
+- write config file(s) as root (must be owned by uid 0; SoftMig rejects symlinks and non-root-owned files):
   - `/var/run/softmig/${SLURM_JOB_ID}.conf`
   - and/or `/var/run/softmig/${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}.conf` for array jobs
 See: `docs/examples/prolog_softmig.sh`.

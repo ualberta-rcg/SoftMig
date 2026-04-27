@@ -98,7 +98,10 @@ sudo unshare -m -- sh -c " \
 "
 ```
 
-If you keep the library at `/var/lib/shared/libsoftmig.so`, copy there instead.
+**Important**: the destination path must match what is listed in `/etc/ld.so.preload`.
+The install script uses `/var/lib/shared/libsoftmig.so`; some deployments use
+`/usr/local/lib/libsoftmig.so` instead. Check your `/etc/ld.so.preload` and adjust
+the `cp` target accordingly.
 
 ### DRAC operational update pattern (from login/admin host)
 

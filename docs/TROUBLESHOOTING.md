@@ -48,7 +48,7 @@ rm -f ${SLURM_TMPDIR}/cudevshr.cache*
 
 ## Symptom: no logs / permission errors creating logs
 
-SoftMig writes logs under `/var/log/softmig/` by default. The directory must allow users (job UIDs) to create files.
+SoftMig writes logs under `/var/log/softmig/` by default. The directory must allow users (job UIDs) to create files. If `/var/log/softmig/` is not writable **and** `SLURM_TMPDIR` is set, logs fall back to `$SLURM_TMPDIR/softmig_{jobid}.log`. If neither is writable, logging silently fails.
 
 Common setups:
 

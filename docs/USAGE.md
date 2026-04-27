@@ -70,6 +70,17 @@ nvidia-smi
 
 Notes:
 
-- Size suffixes are **single-character**: `G/g`, `M/m`, `K/k`.
+- Size suffixes are **single-character**: `G/g` (GiB), `M/m` (MiB), `K/k` (KiB). No suffix means bytes.
 - For SLURM deployment details see: `docs/SLURM_INTEGRATION.md` and `docs/BUILD_AND_INSTALL.md`.
+
+## Environment variable reference
+
+| Variable | Purpose | Notes |
+|---|---|---|
+| `CUDA_DEVICE_MEMORY_LIMIT` | GPU memory ceiling | Single-char suffix: `G`, `M`, `K`. Only used outside SLURM. |
+| `CUDA_DEVICE_SM_LIMIT` | SM utilization % (0-100) | `0` = no limit. Only used outside SLURM. |
+| `SOFTMIG_LOG_LEVEL` | Log verbosity | `0`=errors (default), `1`=+warnings, `2`=+debug, `3`=+info+console |
+| `SOFTMIG_LOG_FILE` | Override log file path | Overrides the default `/var/log/softmig/{jobid}.log` |
+| `SOFTMIG_LOCK_FILE` | Override lock file path | Overrides the default `$SLURM_TMPDIR/vgpulock/lock.{jobid}` |
+| `CUDA_DEVICE_MEMORY_SHARED_CACHE` | Override shared cache path | Overrides the default `$SLURM_TMPDIR/cudevshr.cache.{jobid}` |
 
