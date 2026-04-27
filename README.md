@@ -11,13 +11,15 @@
 
 **SoftMig** is a SLURM-integrated software GPU slicing system for shared NVIDIA GPU clusters. It lets administrators schedule ordinary NVIDIA GPUs in a MIG-like way using software-enforced memory limits, compute time-slicing, and SLURM prolog/epilog automation.
 
-SoftMig does **not** enable, modify, or replace NVIDIA Hardware MIG. Instead, it provides a scheduler-controlled software layer for running fractional GPU jobs on GPUs that do not support hardware MIG, or on clusters where hardware MIG is too rigid for day-to-day research scheduling.
+SoftMig is based on [HAMi-core](https://github.com/Project-HAMi/HAMi-core), adapted for SLURM-based HPC environments. The project was inspired by Tim Weiers from the University of Alberta Unix team, who suggested HAMi-core as a foundation for bringing software GPU slicing into research computing clusters.
 
-The goal is to let SLURM treat each GPU as a flexible shared resource. A 48GB GPU, for example, can be offered as a full GPU, two half-GPU slices, four quarter-GPU slices, or other site-defined layouts. Each job receives a configured memory limit and proportional access to GPU compute through time-slicing and SM throttling.
+SoftMig does **not** enable, modify, or replace NVIDIA Hardware MIG. Instead, it provides a scheduler-controlled software layer for fractional GPU jobs on GPUs that do not support hardware MIG, or where hardware MIG is too rigid for dynamic SLURM scheduling.
 
-Unlike Hardware MIG, SoftMig slice layouts can be changed through SLURM policy without draining nodes, rebooting, or changing GPU MIG mode. This allows full-GPU jobs, half-GPU jobs, quarter-GPU jobs, and other fractional jobs to coexist across the same GPU nodes using normal SLURM scheduling.
+A 48GB GPU, for example, can be offered as a full GPU, two half-GPU slices, four quarter-GPU slices, or other site-defined layouts. Each job receives a configured memory limit and proportional access to GPU compute through time-slicing and SM throttling.
 
-SoftMig is intended for Digital Research Alliance of Canada / Compute Canada-style research clusters where GPU utilization, scheduling flexibility, and broad NVIDIA GPU compatibility matter more than hardware-level isolation.
+Unlike Hardware MIG, SoftMig slice layouts can be changed through SLURM policy without draining nodes, rebooting, or changing GPU MIG mode. This allows full-GPU and fractional GPU jobs to coexist across the same nodes using normal SLURM scheduling.
+
+SoftMig is intended for [Digital Research Alliance of Canada](https://alliancecan.ca/) / Compute Canada-style research clusters where GPU utilization, scheduling flexibility, and broad NVIDIA GPU compatibility matter more than hardware-level isolation.
 
 ## Features
 
