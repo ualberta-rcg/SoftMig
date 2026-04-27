@@ -121,6 +121,24 @@ sudo ssh "$TARGET_NODE" "unshare -m -- sh -c '\
 If your production path is `/var/lib/shared/libsoftmig.so`, set `DEST_LIB` accordingly
 and make sure `/etc/ld.so.preload` points to that exact path.
 
+### Exact local update command example (no SSH)
+
+Example build artifact location pattern:
+
+`/$LOCATION/SoftMig/build/libsoftmig.so`
+
+Example:
+
+```bash
+LOCATION=home/rahimk/scratch
+```
+
+Use this local command on the target node:
+
+```bash
+sudo unshare -m -- sh -c 'mount --bind /dev/null /etc/ld.so.preload && cp /$LOCATION/SoftMig/build/libsoftmig.so /usr/local/lib/libsoftmig.so && chmod 644 /usr/local/lib/libsoftmig.so && chown root:root /usr/local/lib/libsoftmig.so'
+```
+
 ### Why this works
 
 - `unshare -m` creates a new mount namespace.

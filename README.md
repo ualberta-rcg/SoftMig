@@ -76,8 +76,8 @@ library replacement under `/etc/ld.so.preload`) are maintained in:
 
 SoftMig uses a priority system for configuration:
 
-1. **Config files** (highest priority) - Used in SLURM jobs
-2. **Environment variables** - Used for testing or when no config file exists
+1. **Config files** (only source in SLURM jobs) - `/var/run/softmig/{jobid}.conf`
+2. **Environment variables** - Used **only outside SLURM** (local testing). Inside a SLURM job, env vars are ignored even if no config file exists.
 3. **Passive mode** - No limits enforced (library loads but does nothing)
 
 #### Config Files (SLURM Jobs)
@@ -107,7 +107,7 @@ CUDA_DEVICE_SM_LIMIT=25
 
 #### Environment Variables (Testing)
 
-**Outside SLURM (testing)**: SoftMig automatically falls back to environment variables if no config file exists. See "Environment Variables" section for complete list.
+**Outside SLURM only (local testing)**: When `SLURM_JOB_ID` is not set, SoftMig reads limits from environment variables. Inside a SLURM job, environment variables are never used — only the config file applies.
 
 **Example**:
 ```bash
@@ -139,9 +139,9 @@ SoftMig supports the following environment variables. **In production SLURM jobs
 #### Memory and Compute Limits
 
 - **`CUDA_DEVICE_MEMORY_LIMIT`**: GPU memory limit per device
-  - Format: Size with unit suffix (e.g., `16g`, `24G`, `12288M`, `12GB`)
-  - Units: `K`/`k` (kilobytes), `M`/`m` (megabytes), `G`/`g` (gigabytes)
-  - Examples: `16g`, `24G`, `12288M`, `12GB`
+  - Format: Integer followed by a single-character unit suffix: `G`/`g`, `M`/`m`, `K`/`k`
+  - Examples: `16g`, `24G`, `12288M` (note: `12GB` does NOT work — only single-char suffixes)
+  - No suffix = bytes
   - Per-device override: `CUDA_DEVICE_MEMORY_LIMIT_0`, `CUDA_DEVICE_MEMORY_LIMIT_1`, etc.
   - **Used for**: Limiting GPU memory allocations. When exceeded, allocations return `CUDA_ERROR_OUT_OF_MEMORY`.
 
@@ -182,9 +182,9 @@ SoftMig supports the following environment variables. **In production SLURM jobs
 
 #### Environment Variable Priority
 
-1. **Config file** (`/var/run/softmig/{jobid}.conf`) - **Highest priority** (used in SLURM jobs)
-2. **Environment variables** - Only used if no config file exists (for testing)
-3. **Passive mode** - If neither config file nor environment variables are set, SoftMig operates in passive mode (no limits enforced)
+1. **Inside SLURM** (`SLURM_JOB_ID` is set): Config file is the **only source**. Environment variables are ignored. If no config file exists, the job runs in passive mode (no limits).
+2. **Outside SLURM** (`SLURM_JOB_ID` is not set): Environment variables are used. If none are set, passive mode.
+3. **Passive mode** - No limits enforced; library is a no-op.
 
 ### Quick Test
 
@@ -387,8 +387,8 @@ That guide includes:
 - Epilog deletes config file → deactivates limits when job ends
 
 **Config File Priority:**
-1. Config file (`/var/run/softmig/{jobid}.conf` or `/var/run/softmig/{jobid}_{arrayid}.conf`) - **Takes priority** (created by `prolog_softmig.sh`)
-2. Environment variables - Only used if config file doesn't exist (for testing)
+1. Config file (`/var/run/softmig/{jobid}.conf` or `/var/run/softmig/{jobid}_{arrayid}.conf`) - **Only source for SLURM jobs** (created by `prolog_softmig.sh`)
+2. Environment variables - **Only used outside SLURM** (when `SLURM_JOB_ID` is not set). Inside a SLURM job without a config file, limits are 0 (passive mode).
 
 **Passive Mode:**
 - If neither config file nor environment variables are set, SoftMig operates in passive mode
@@ -593,7 +593,7 @@ ACTIVE_OOM_KILLER=1
 ### Multi-Process Jobs
 
 SoftMig tracks memory usage across all processes in a SLURM job:
-- Uses shared memory (`/dev/shm` or `$SLURM_TMPDIR`) to coordinate between processes
+- Uses a file-backed shared memory region (`$SLURM_TMPDIR/cudevshr.cache.{jobid}`) to coordinate between processes
 - All processes in the same job share the same memory limit
 - Example: If 2 processes each allocate 6GB on a 12GB limit, the second allocation will fail with OOM
 
@@ -606,7 +606,7 @@ export CUDA_DEVICE_MEMORY_LIMIT=12g
 # Process 2 tries to allocate 6GB - fails with OOM (8GB + 6GB = 14GB > 12GB limit)
 ```
 
-This is why the user mentioned: `export SOFTMIG_LOG_LEVEL=3; cd ./gpu-burn/; (./gpu_burn -tc 3600 &); (./gpu_burn -tc 3600 &)` used to not work - both processes were competing for the same memory limit.
+For example, running `(./gpu_burn -tc 3600 &); (./gpu_burn -tc 3600 &)` with a shared limit means both processes compete for the same memory pool.
 
 ## Important Notes
 
