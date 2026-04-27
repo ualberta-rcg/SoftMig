@@ -1,3 +1,12 @@
+/**
+ * @file hook.c (cuda)
+ * @brief CUDA driver library loading, dispatch table, and cuGetProcAddress hook.
+ *
+ * Populates the cuda_library_entry[] dispatch table by dlopen-ing libcuda.so.1.
+ * Hooks cuGetProcAddress / cuGetProcAddress_v2 so that CUDA runtime calls are
+ * redirected through SoftMig's hooked functions (memory allocation, kernel
+ * launch rate limiting, etc.).
+ */
 #include "include/libcuda_hook.h"
 #include <string.h>
 #include "include/libsoftmig.h"
@@ -237,6 +246,7 @@ int prior_function(char tmp[500]) {
     return 0;
 }
 
+/** Resolve all CUDA driver symbols from libcuda.so.1 into cuda_library_entry[]. */
 void load_cuda_libraries() {
     void *table = NULL;
     int i = 0;

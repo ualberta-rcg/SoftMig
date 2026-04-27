@@ -1,3 +1,11 @@
+/**
+ * @file log_utils.h
+ * @brief Logging macros and utilities for SoftMig.
+ *
+ * Provides leveled logging (ERROR, WARN, DEBUG, INFO) to both file and console.
+ * Log files are placed in /var/log/softmig/ keyed by SLURM job ID, with fallback
+ * to SLURM_TMPDIR. Log level is controlled by SOFTMIG_LOG_LEVEL env var (0-3).
+ */
 #ifndef __LOG_UTILS_H__
 #define __LOG_UTILS_H__
 
@@ -264,16 +272,6 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
             __LINE__, res);                   \
         return res;                           \
     } }                                       \
-
-#define CHECK_SUCCESS(res) {                  \
-    if (res != CUDA_SUCCESS)                  \
-        return res;                           \
-}
-
-#define IF_CHECK_OOM(res) {                   \
-    if (res < 0)                              \
-        return CUDA_ERROR_OUT_OF_MEMORY;      \
-}     
 
 
 #endif

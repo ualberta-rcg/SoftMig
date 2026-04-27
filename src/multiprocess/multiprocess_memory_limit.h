@@ -1,3 +1,12 @@
+/**
+ * @file multiprocess_memory_limit.h
+ * @brief Shared memory region, per-process memory tracking, and OOM killer API.
+ *
+ * Defines the mmap-backed shared_region_t structure that coordinates GPU memory
+ * limits and SM utilization across co-located processes in a SLURM job.
+ * Processes register via ensure_initialized() and communicate usage through
+ * semaphore-protected shared memory slots.
+ */
 #ifndef __MULTIPROCESS_MEMORY_LIMIT_H__
 #define __MULTIPROCESS_MEMORY_LIMIT_H__
 
@@ -28,9 +37,9 @@
 #define ENV_OVERRIDE_FILE "/overrideEnv"
 
 #define CUDA_DEVICE_MAX_COUNT 16
+#define CTX_ACTIVATE_SIZE 32
 #define CUDA_DEVICE_MEMORY_UPDATE_SUCCESS 0
 #define CUDA_DEVICE_MEMORY_UPDATE_FAILURE 1
-#define MEMORY_LIMIT_TOLERATION_RATE 1.1
 
 #define SHARED_REGION_SIZE_MAGIC  sizeof(shared_region_t)
 #define SHARED_REGION_MAX_PROCESS_NUM 1024
@@ -119,14 +128,23 @@ typedef struct {
   CUcontext ctx;
 } thread_context_map;
 
+/** Initialize the shared region (once per process, thread-safe via pthread_once). */
 void ensure_initialized();
 
+/** Get SM utilization limit (percentage) for a CUDA device. Returns 100 if disabled. */
 int get_current_device_sm_limit(int dev);
+
+/** Get memory limit in bytes for a CUDA device. Returns 0 if no limit. */
 uint64_t get_current_device_memory_limit(const int dev);
+
+/** Set memory limit in bytes for a CUDA device in the shared region. */
 int set_current_device_memory_limit(const int dev,size_t newlimit);
-int set_current_device_sm_limit(int dev,int scale);
 int set_current_device_sm_limit_scale(int dev,int scale);
+
+/** Scan shared region to check if current process has a registered host PID. */
 int update_host_pid();
+
+/** Register the NVML-visible host PID for the current process. */
 int set_host_pid(int hostpid);
 
 uint64_t get_current_device_memory_monitor(const int dev);
@@ -142,7 +160,6 @@ int get_current_priority();
 int set_recent_kernel(int value);
 int get_recent_kernel();
 int get_utilization_switch();
-int set_env_utilization_switch();
 
 int set_gpu_device_memory_monitor(int32_t pid,int dev,size_t monitor);
 int set_gpu_device_sm_utilization(int32_t pid,int dev, unsigned int smUtil);
@@ -150,21 +167,33 @@ int init_gpu_device_utilization();
 int add_gpu_device_memory_usage(int32_t pid,int dev,size_t usage,int type);
 int rm_gpu_device_memory_usage(int32_t pid,int dev,size_t usage,int type);
 
+/** Look up a process slot by its NVML-visible host PID (lazy-registers if needed). */
 shrreg_proc_slot_t *find_proc_by_hostpid(int hostpid);
+
+/**
+ * Kill all GPU processes belonging to the current cgroup/UID on all devices.
+ * Only effective for non-root users. Returns number of processes killed.
+ */
 int active_oom_killer();
+
+/**
+ * Gradually kill processes on a specific CUDA device, newest-PID first,
+ * until memory usage drops below the limit or the cgroup is killed.
+ * @return Number of processes killed, or -1 on error.
+ */
 int gradual_oom_killer(int cuda_dev);
+
+/** Record kernel launch timestamp for utilization tracking (rate-limited). */
 void pre_launch_kernel();
 
 int shrreg_major_version();
 int shrreg_minor_version();
 int init_device_info();
 
-//void inc_current_device_memory_usage(const int dev, const uint64_t usage);
-//void decl_current_device_memory_usage(const int dev, const uint64_t usage);
-
-//int oom_check(const int dev,int addon);
-
+/** Acquire the shared region semaphore (blocks with timeout, auto-recovers dead owners). */
 void lock_shrreg();
+
+/** Release the shared region semaphore. */
 void unlock_shrreg();
 
 //Setspec of the corresponding device
@@ -175,10 +204,14 @@ void suspend_all();
 void resume_all();
 int wait_status_self(int status);
 int wait_status_all(int status);
-void print_all();
 
+/** Load environment variables from a key=value file (legacy, skipped in SLURM jobs). */
 int load_env_from_file(char *filename);
-unsigned int nvml_to_cuda_map(unsigned int nvmldev);
+
+/** Map an NVML device index to its CUDA device index. Returns -1 if not found. */
+int nvml_to_cuda_map(unsigned int nvmldev);
+
+/** Map a CUDA device index to its NVML device index. */
 unsigned int cuda_to_nvml_map(unsigned int cudadev);
 
 int clear_proc_slot_nolock(int);

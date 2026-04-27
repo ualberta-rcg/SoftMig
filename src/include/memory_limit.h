@@ -1,3 +1,10 @@
+/**
+ * @file memory_limit.h
+ * @brief GPU memory and SM limit environment variable definitions and enforcement macros.
+ *
+ * Reads per-device limits from CUDA_DEVICE_MEMORY_LIMIT and CUDA_DEVICE_SM_LIMIT,
+ * and provides macros to ensure the shared region is initialized before any memory op.
+ */
 #ifndef __MEMORY_LIMIT_H__
 #define __MEMORY_LIMIT_H__
 
@@ -23,44 +30,6 @@ extern int wait_status_self(int status);
     ensure_initialized();                                 \
     while(!wait_status_self(1)) { LOG_DEBUG("E1"); sleep(1); }             \
 }                                                         \
-
-#define INC_MEMORY_OR_RETURN_ERROR(bytes) {               \
-    CUdevice dev;                                         \
-    CHECK_DRV_API(cuCtxGetDevice(&dev));                  \
-    if (inc_current_device_memory_usage(dev, bytes) !=    \
-        CUDA_DEVICE_MEMORY_UPDATE_SUCCESS) {              \
-        return CUDA_ERROR_OUT_OF_MEMORY;                  \
-    } }                                                   \
-
-#define DECL_MEMORY_ON_ERROR(res, bytes) {                \
-    CUdevice dev;                                         \
-    CHECK_DRV_API(cuCtxGetDevice(&dev));                  \
-    if (res != CUDA_SUCCESS) {                            \
-        decl_current_device_memory_usage(dev, bytes);     \
-    } }                                                   \
-
-#define DECL_MEMORY_ON_SUCCESS(res, bytes) {              \
-    CUdevice dev;                                         \
-    CHECK_DRV_API(cuCtxGetDevice(&dev));                  \
-    if (res == CUDA_SUCCESS) {                            \
-        decl_current_device_memory_usage(dev, bytes);     \
-    } }                                                   \
-
-#define INC_MEMORY_OR_RETURN_ERROR_WITH_DEV(d, bytes) {   \
-    if (inc_current_device_memory_usage(d, bytes) !=      \
-        CUDA_DEVICE_MEMORY_UPDATE_SUCCESS) {              \
-        return CUDA_ERROR_OUT_OF_MEMORY;                  \
-    }                                                     \
-
-#define DECL_MEMORY_ON_ERROR_WITH_DEV(dev, res, bytes)    \
-    if (res != CUDA_SUCCESS) {                            \
-        decl_current_device_memory_usage(dev, bytes);     \
-    }                                                     \
-
-#define DECL_MEMORY_ON_SUCCESS_WITH_DEV(dev, res, bytes)  \
-    if (res == CUDA_SUCCESS) {                            \
-        decl_current_device_memory_usage(dev, bytes);     \
-    }                                                     \
 
 #include "multiprocess/multiprocess_memory_limit.h"
 

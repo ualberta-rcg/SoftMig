@@ -1,3 +1,10 @@
+/**
+ * @file process_utils.h
+ * @brief Process introspection utilities for cgroup-aware process filtering.
+ *
+ * Provides functions to check process liveness, read UIDs from /proc,
+ * and determine cgroup membership for SLURM job isolation.
+ */
 #ifndef __UTILS_PROCESS_UTILS_H__
 #define __UTILS_PROCESS_UTILS_H__ 
 
@@ -26,22 +33,5 @@ int proc_alive(int32_t pid);
 // Returns 1 if process belongs to same session, 0 if not, -1 on error (fallback to UID)
 // Supports both cgroups v1 and v2
 int proc_belongs_to_current_cgroup_session(int32_t pid);
-
-// Safely extract PID from nvmlProcessInfo_t, handling struct mismatches
-// between CUDA toolkit headers and driver library
-// Returns valid PID if found, 0 if not found
-unsigned int extract_pid_safely(void *proc);
-
-// Safely extract memory value from nvmlProcessInfo_t when PID is at wrong offset
-// This handles struct mismatches where PID and memory fields are shifted
-// actual_pid: The PID found by extract_pid_safely
-// header_pid: The PID from the header field (infos[i].pid)
-// Returns memory value in bytes, or 0 if not found
-uint64_t extract_memory_safely(void *proc, unsigned int actual_pid, unsigned int header_pid);
-
-// Get process start time (clock ticks since boot) from /proc/PID/stat
-// Returns 0 on error, or starttime (field 22) on success
-unsigned long long proc_get_starttime(int32_t pid);
-
 
 #endif  // __UTILS_PROCESS_UTILS_H__

@@ -20,6 +20,15 @@ else()
 endif()
 
 add_library(nvml_mod OBJECT nvml_entry.c hook.c)
-target_compile_options(nvml_mod PUBLIC ${LIBRARY_COMPILE_FLAGS})
+# See comment in src/cuda/CMakeLists.txt: remove -fvisibility=hidden so NVML
+# wrappers export with default visibility; the linker version script keeps
+# the final .so's export surface limited to actual hook symbols.
+set(NVML_MOD_FLAGS ${LIBRARY_COMPILE_FLAGS})
+list(REMOVE_ITEM NVML_MOD_FLAGS "-fvisibility=hidden")
+target_compile_options(nvml_mod PUBLIC ${NVML_MOD_FLAGS})
 # Link against system driver's NVML, not CUDA toolkit's
-target_link_libraries(nvml_mod PUBLIC ${NVML_LIB} -lcuda)
+# Do NOT link -lnvidia-ml here: nvml_mod is an OBJECT library and its link
+# deps propagate to libsoftmig, where linking libnvidia-ml would shadow our
+# own nvml wrapper symbols in the output dynsym table (breaks LD_PRELOAD).
+# At runtime we dlopen("libnvidia-ml.so.1") in load_nvml_libraries().
+target_link_libraries(nvml_mod PUBLIC -lcuda)

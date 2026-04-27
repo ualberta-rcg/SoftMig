@@ -1,3 +1,11 @@
+/**
+ * @file process_utils.c
+ * @brief Process introspection: UID lookup, liveness check, and cgroup session matching.
+ *
+ * Reads /proc/<pid>/status and /proc/<pid>/cgroup to determine process UID and
+ * cgroup membership. Used by the OOM killer and NVML process filtering to
+ * isolate GPU resources per SLURM job.
+ */
 #include "include/process_utils.h"
 #include "include/log_utils.h"
 #include <stdlib.h>
@@ -5,9 +13,12 @@
 #include <sys/stat.h>
 #include <string.h>
 #include <unistd.h>
-// Include nvml-subset.h for nvmlProcessInfo_t definition
-#define NVML_NO_UNVERSIONED_FUNC_DEFS
-#include "include/nvml-subset.h"
+
+static int in_slurm_job(void) {
+    static int cached = -1;
+    if (cached == -1) cached = (getenv("SLURM_JOB_ID") != NULL) ? 1 : 0;
+    return cached;
+}
 
 // Get the UID of a process by PID (returns -1 on error)
 uid_t proc_get_uid(int32_t pid) {
@@ -193,56 +204,48 @@ static char* extract_job_id_from_path(const char* cgroup_path) {
     return NULL;
 }
 
-// Check if a process belongs to the same cgroup session as the current process
-// Returns 1 if process belongs to same session, 0 if not, -1 on error
-// Falls back to -1 if cgroups cannot be determined (should use UID filtering)
+/**
+ * Check if a process belongs to the same cgroup session as the current process.
+ *
+ * Compares cgroup paths (or extracted SLURM job IDs) between the target PID
+ * and the calling process. Used by OOM killer and NVML filtering for job isolation.
+ * @return 1 if same session, 0 if different, -1 if cgroup cannot be determined (caller should fall back to UID).
+ */
 int proc_belongs_to_current_cgroup_session(int32_t pid) {
-    pid_t current_pid = getpid();
-    uid_t current_uid = getuid();
-    
-    // Get current process's cgroup path
-    char* current_cgroup = proc_get_cgroup_path(current_pid);
-    if (current_cgroup == NULL) {
-        // Cannot determine current cgroup - fall back to UID check
-        LOG_DEBUG("proc_belongs_to_current_cgroup_session: Current PID %d (UID %u) - cannot determine cgroup, returning -1 (fallback to UID)", 
-                 current_pid, current_uid);
-        return -1;
+    static char* cached_self_cgroup = NULL;
+    static char* cached_self_job_id = NULL;
+    static int self_cache_initialized = 0;
+
+    if (!self_cache_initialized) {
+        cached_self_cgroup = proc_get_cgroup_path(getpid());
+        if (cached_self_cgroup != NULL) {
+            cached_self_job_id = extract_job_id_from_path(cached_self_cgroup);
+        }
+        self_cache_initialized = 1;
+    }
+
+    if (cached_self_cgroup == NULL) {
+        return in_slurm_job() ? 0 : -1;
     }
     
-    // Get target process's cgroup path
     char* proc_cgroup = proc_get_cgroup_path(pid);
     if (proc_cgroup == NULL) {
-        free(current_cgroup);
-        // Cannot determine process cgroup - fall back to UID check
-        LOG_DEBUG("proc_belongs_to_current_cgroup_session: Target PID %d - cannot determine cgroup, returning -1 (fallback to UID)", pid);
-        return -1;
+        return in_slurm_job() ? 0 : -1;
     }
     
-    // Try to extract job IDs from both paths
-    char* current_job_id = extract_job_id_from_path(current_cgroup);
     char* proc_job_id = extract_job_id_from_path(proc_cgroup);
     
     int result = -1;
     
-    if (current_job_id != NULL && proc_job_id != NULL) {
-        // Both have job IDs - compare them
-        int job_match = (strcmp(current_job_id, proc_job_id) == 0);
-        result = job_match ? 1 : 0;
-    } else if (current_job_id == NULL && proc_job_id == NULL) {
-        // Neither has a job ID - compare full cgroup paths
-        // Check if they share the same parent path (up to the job level)
-        // For now, do a simple string comparison of the paths
-        // This will match if they're in the same cgroup hierarchy
-        int path_match = (strcmp(current_cgroup, proc_cgroup) == 0);
-        result = path_match ? 1 : 0;
+    if (cached_self_job_id != NULL && proc_job_id != NULL) {
+        result = (strcmp(cached_self_job_id, proc_job_id) == 0) ? 1 : 0;
+    } else if (cached_self_job_id == NULL && proc_job_id == NULL) {
+        result = (strcmp(cached_self_cgroup, proc_cgroup) == 0) ? 1 : 0;
+    } else {
+        result = in_slurm_job() ? 0 : -1;
     }
-    // If one has a job ID and the other doesn't, they're different (result stays -1)
     
-    free(current_cgroup);
     free(proc_cgroup);
-    if (current_job_id != NULL) {
-        free(current_job_id);
-    }
     if (proc_job_id != NULL) {
         free(proc_job_id);
     }
@@ -250,237 +253,4 @@ int proc_belongs_to_current_cgroup_session(int32_t pid) {
     return result;
 }
 
-/**
- * Safely extract PID from nvmlProcessInfo_t, handling struct mismatches
- * between CUDA toolkit headers and driver library.
- * 
- * This function scans the struct for a valid PID value, handling cases where:
- * - CUDA 12.2 headers define struct one way
- * - Driver 570.x (CUDA 12.8) has different struct layout
- * 
- * @param proc Pointer to nvmlProcessInfo_t struct from NVML (void* for header compatibility)
- * @return Valid PID if found, 0 if not found
- */
-unsigned int extract_pid_safely(void *proc) {
-    nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
-    
-    // FIRST: Try the standard PID field - this is the fast path (most common case)
-    // Most of the time, the PID field is correct, so we can avoid expensive scanning
-    unsigned int pid = info->pid;
-    if (pid >= 100 && pid < 4000000 && pid != 0xffffffff) {
-        // Quick validation: check if process exists (this is the only /proc access in fast path)
-        char path[64];
-        snprintf(path, sizeof(path), "/proc/%u/cmdline", pid);
-        if (access(path, F_OK) == 0) {
-            return pid;  // Fast path: standard field is valid - no expensive scanning needed
-        }
-    }
-    
-    // SLOW PATH: Standard field is invalid (0, 0xffffffff, or process doesn't exist)
-    // Only do expensive scanning if the standard field failed
-    // This handles struct mismatches between CUDA headers and driver
-    unsigned char *raw = (unsigned char *)proc;
-    
-    // Scan for valid PID in the struct
-    // Scan first 16 bytes (covers version + pid + start of usedGpuMemory)
-    // PID is typically at offset 4 (after version) or 0 (if version is missing)
-    for (int offset = 0; offset <= 12; offset += 4) {
-        unsigned int candidate = *(unsigned int*)(raw + offset);
-        
-        // Skip invalid PID ranges
-        if (candidate < 100 || candidate > 4000000) continue;
-        if (candidate == 0xffffffff) continue;
-        // Skip if we already checked this value (it's the standard field)
-        if (candidate == pid) continue;
-        
-        // Verify it's a real process by checking /proc/%u/cmdline
-        // Using cmdline is more reliable than just checking the directory
-        char path[64];
-        snprintf(path, sizeof(path), "/proc/%u/cmdline", candidate);
-        if (access(path, F_OK) == 0) {
-            // Found PID at different offset - struct mismatch detected
-            // Only log mismatch as warning (not debug) since this is called very frequently
-            if (pid != 0 && pid != 0xffffffff) {
-                // Only warn on actual mismatches (not invalid header values)
-                static unsigned int mismatch_log_counter = 0;
-                if (++mismatch_log_counter % 100 == 0) {  // Log every 100th mismatch to avoid spam
-                    LOG_WARN("extract_pid_safely: PID mismatch detected - found PID %u at offset %d (header pid field was %u)", 
-                             candidate, offset, pid);
-                }
-            }
-            return candidate;
-        }
-    }
-    
-    return 0;  // No valid PID found
-}
-
-/**
- * Safely extract memory value from nvmlProcessInfo_t when PID is at wrong offset
- * This handles struct mismatches where PID and memory fields are shifted
- * 
- * @param proc Pointer to nvmlProcessInfo_t struct from NVML
- * @param actual_pid The PID found by extract_pid_safely (may be at wrong offset)
- * @param header_pid The PID from the header field (infos[i].pid)
- * @return Memory value in bytes, or 0 if not found
- */
-uint64_t extract_memory_safely(void *proc, unsigned int actual_pid, unsigned int header_pid) {
-    nvmlProcessInfo_t *info = (nvmlProcessInfo_t *)proc;
-    unsigned char *raw = (unsigned char *)proc;
-    
-    // If PID matches header and is valid, struct layout is correct - use standard field
-    if (actual_pid == header_pid && header_pid != 0 && header_pid != 0xffffffff) {
-        return info->usedGpuMemory;
-    }
-    
-    // Struct mismatch detected - PID is at wrong offset, so memory is probably at wrong offset too
-    // First, find where the PID actually is in the struct
-    int pid_offset = -1;
-    for (int offset = 0; offset <= 12; offset += 4) {
-        unsigned int candidate = *(unsigned int*)(raw + offset);
-        if (candidate == actual_pid) {
-            pid_offset = offset;
-            break;
-        }
-    }
-    
-    // Add detailed logging to help debug struct layout issues (throttled to avoid spam)
-    static unsigned int memory_log_counter = 0;
-    if (++memory_log_counter % 100 == 0) {  // Log every 100th call
-        LOG_FILE_DEBUG("extract_memory_safely: PID %u (header %u) at offset %d, raw_bytes[0-23]: "
-                      "%02x %02x %02x %02x %02x %02x %02x %02x "
-                      "%02x %02x %02x %02x %02x %02x %02x %02x "
-                      "%02x %02x %02x %02x %02x %02x %02x %02x",
-                      actual_pid, header_pid, pid_offset,
-                      raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                      raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
-                      raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23]);
-    }
-    
-    // If we couldn't find the PID offset, fall back to scanning without overlap detection
-    if (pid_offset == -1) {
-        // PID not found at expected offsets - try scanning for memory anyway
-        for (int offset = 8; offset <= 20; offset += 4) {
-            uint64_t candidate = *(uint64_t*)(raw + offset);
-            if (candidate > 1048576 && candidate < 107374182400ULL) {
-                if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
-                    // Also check if either half of the 64-bit value matches PID
-                    uint32_t low_bits = (uint32_t)(candidate & 0xFFFFFFFFULL);
-                    uint32_t high_bits = (uint32_t)((candidate >> 32) & 0xFFFFFFFFULL);
-                    if (low_bits != actual_pid && high_bits != actual_pid && 
-                        low_bits != header_pid && high_bits != header_pid) {
-                        return candidate;
-                    }
-                }
-            }
-        }
-        return info->usedGpuMemory;  // Fallback
-    }
-    
-    // Now we know where the PID is - read memory from offsets that don't overlap with it
-    // Memory is 8 bytes, PID is 4 bytes
-    // We need to avoid reading 8-byte values that include the PID
-    
-    // Try 8-byte aligned offsets that don't overlap with PID
-    // Common safe offsets: 0, 8, 16 (8-byte aligned for 64-bit reads)
-    int safe_offsets[] = {0, 8, 16};
-    int num_safe_offsets = 3;
-    
-    for (int i = 0; i < num_safe_offsets; i++) {
-        int mem_offset = safe_offsets[i];
-        
-        // Check if this 8-byte read would overlap with PID
-        // Overlap if: mem_offset <= pid_offset < mem_offset+8 OR mem_offset < pid_offset+4 <= mem_offset+8
-        int pid_end = pid_offset + 4;  // PID occupies 4 bytes
-        if ((mem_offset <= pid_offset && pid_offset < mem_offset + 8) ||
-            (mem_offset < pid_end && pid_end <= mem_offset + 8)) {
-            // This offset overlaps with PID - skip it
-            continue;
-        }
-        
-        // This offset is safe - try reading memory from here
-        uint64_t candidate = *(uint64_t*)(raw + mem_offset);
-        
-        // Validate memory value (typically > 1MB and < 100GB)
-        if (candidate > 1048576 && candidate < 107374182400ULL) {
-            // Additional validation: make sure it's not the PID
-            if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
-                // Also check if either half of the 64-bit value matches PID
-                uint32_t low_bits = (uint32_t)(candidate & 0xFFFFFFFFULL);
-                uint32_t high_bits = (uint32_t)((candidate >> 32) & 0xFFFFFFFFULL);
-                if (low_bits != actual_pid && high_bits != actual_pid && 
-                    low_bits != header_pid && high_bits != header_pid) {
-                    return candidate;
-                }
-            }
-        }
-    }
-    
-    // Also try offset 12, 20 (4-byte aligned but might contain memory)
-    // Only if they don't overlap with PID
-    for (int offset = 12; offset <= 20; offset += 8) {
-        // Check if this 8-byte read would overlap with PID
-        int pid_end = pid_offset + 4;
-        if ((offset <= pid_offset && pid_offset < offset + 8) ||
-            (offset < pid_end && pid_end <= offset + 8)) {
-            continue;  // Skip overlapping offsets
-        }
-        
-        uint64_t candidate = *(uint64_t*)(raw + offset);
-        if (candidate > 1048576 && candidate < 107374182400ULL) {
-            if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
-                uint32_t low_bits = (uint32_t)(candidate & 0xFFFFFFFFULL);
-                uint32_t high_bits = (uint32_t)((candidate >> 32) & 0xFFFFFFFFULL);
-                if (low_bits != actual_pid && high_bits != actual_pid && 
-                    low_bits != header_pid && high_bits != header_pid) {
-                    return candidate;
-                }
-            }
-        }
-    }
-    
-    // Final fallback: scan ALL 8-byte aligned offsets (0, 8, 16, 24) more thoroughly
-    // This catches edge cases where memory might be at unexpected locations
-    for (int offset = 0; offset <= 24; offset += 8) {
-        // Skip if this overlaps with PID
-        int pid_end = pid_offset + 4;
-        if ((offset <= pid_offset && pid_offset < offset + 8) ||
-            (offset < pid_end && pid_end <= offset + 8)) {
-            continue;
-        }
-        
-        // Skip if we already tried this offset above
-        int already_tried = 0;
-        for (int j = 0; j < num_safe_offsets; j++) {
-            if (safe_offsets[j] == offset) {
-                already_tried = 1;
-                break;
-            }
-        }
-        if (already_tried) continue;
-        
-        uint64_t candidate = *(uint64_t*)(raw + offset);
-        if (candidate > 1048576 && candidate < 107374182400ULL) {
-            if (candidate != (uint64_t)actual_pid && candidate != (uint64_t)header_pid) {
-                uint32_t low_bits = (uint32_t)(candidate & 0xFFFFFFFFULL);
-                uint32_t high_bits = (uint32_t)((candidate >> 32) & 0xFFFFFFFFULL);
-                if (low_bits != actual_pid && high_bits != actual_pid && 
-                    low_bits != header_pid && high_bits != header_pid) {
-                    return candidate;
-                }
-            }
-        }
-    }
-    
-    // Last resort: try standard field anyway (might work in some cases)
-    // But validate it's not the PID
-    uint64_t fallback = info->usedGpuMemory;
-    if (fallback > 1048576 && fallback < 107374182400ULL &&
-        fallback != (uint64_t)actual_pid && fallback != (uint64_t)header_pid) {
-        return fallback;
-    }
-    
-    // If standard field also looks wrong, return 0 to trigger MIN_PROCESS_MEMORY fallback
-    return 0;
-}
 

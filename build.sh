@@ -22,7 +22,7 @@ CMAKE_OPTIONS+=" -DHOOK_NVML_ENABLE=1"               # Hook NVML calls
 # For production deployments, use Release mode
 CMAKE_OPTIONS+=" -DCMAKE_BUILD_TYPE=Release"
 # For debugging/troubleshooting, uncomment the line below and comment the Release line above:
-#CMAKE_OPTIONS+=" -DCMAKE_BUILD_TYPE=Debug"
+#CMAKE_OPTIONS+=" -DCMAKE_BUILD_TYPE=Release"
 
 # Debug options (uncomment for troubleshooting)
 #CMAKE_OPTIONS+=" -DMEMORY_LIMIT_DEBUG=1"            # Enable memory limit debugging

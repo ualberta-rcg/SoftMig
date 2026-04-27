@@ -1,3 +1,12 @@
+/**
+ * @file nvml_entry.c
+ * @brief NVML function wrappers with cgroup/UID-based process filtering.
+ *
+ * Provides the hooked implementations of nvmlDeviceGetComputeRunningProcesses
+ * and nvmlDeviceGetGraphicsRunningProcesses that filter the process list by
+ * cgroup session or UID, so each SLURM job only sees its own GPU processes.
+ * All other NVML functions are thin pass-through wrappers.
+ */
 #include <pthread.h>
 #include <unistd.h>
 #include <sys/types.h>
@@ -6,11 +15,11 @@
 #include "include/libnvml_hook.h"
 #include "include/utils.h"
 #include "include/process_utils.h"
+#include "include/nvml_cache.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
-//extern resource_data_t g_vcuda_config;
 
 // Forward declarations for v2 functions
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
@@ -31,39 +40,12 @@ const char *nvmlErrorString(nvmlReturn_t result) {
   return _entry(result);
 }
 
-/*
-nvmlReturn_t nvmlDeviceGetHandleByIndex_v2(unsigned int index,
-                                           nvmlDevice_t *device) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetHandleByIndex_v2,
-                         index, device);
-}
-nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index,
-                                        nvmlDevice_t *device) {
-  return NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetHandleByIndex, index,
-                         device);
-}
-*/
-
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
                                                   unsigned int *infoCount,
                                                   nvmlProcessInfo_t *infos) {
   // Delegate to v2 version which has the filtering logic
   return nvmlDeviceGetComputeRunningProcesses_v2(device, infoCount, infos);
 }
-/*
-nvmlReturn_t nvmlDeviceGetPciInfo_v3(nvmlDevice_t device, nvmlPciInfo_t *pci) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetPciInfo_v3, device),
-                         pci);
-}
-
-nvmlReturn_t nvmlDeviceGetPciInfo_v2(nvmlDevice_t device, nvmlPciInfo_t *pci) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetPciInfo_v2, device),
-                         pci);
-}
-
-nvmlReturn_t nvmlDeviceGetPciInfo(nvmlDevice_t device, nvmlPciInfo_t *pci) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetPciInfo, device, pci);
-}*/
 
 nvmlReturn_t nvmlDeviceGetProcessUtilization(
     nvmlDevice_t device, nvmlProcessUtilizationSample_t *utilization,
@@ -72,15 +54,6 @@ nvmlReturn_t nvmlDeviceGetProcessUtilization(
                          device, utilization, processSamplesCount,
                          lastSeenTimeStamp);
 }
-/*
-nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetCount_v2,
-                         deviceCount);
-}
-
-nvmlReturn_t nvmlDeviceGetCount(unsigned int *deviceCount) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetCount, deviceCount);
-}*/
 
 nvmlReturn_t nvmlDeviceClearAccountingPids(nvmlDevice_t device) {
   return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceClearAccountingPids,
@@ -378,30 +351,6 @@ nvmlReturn_t nvmlDeviceGetGridLicensableFeatures(
                          nvmlDeviceGetGridLicensableFeatures, device,
                          pGridLicensableFeatures);
 }
-/*
-nvmlReturn_t nvmlDeviceGetHandleByPciBusId_v2(const char *pciBusId,
-                                              nvmlDevice_t *device) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetHandleByPciBusId_v2,
-                         pciBusId, device);
-}
-
-nvmlReturn_t nvmlDeviceGetHandleByPciBusId(const char *pciBusId,
-                                           nvmlDevice_t *device) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetHandleByPciBusId,
-                         pciBusId, device);
-}
-
-nvmlReturn_t nvmlDeviceGetHandleBySerial(const char *serial,
-                                         nvmlDevice_t *device) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetHandleBySerial,
-                         serial, device);
-}
-
-nvmlReturn_t nvmlDeviceGetHandleByUUID(const char *uuid, nvmlDevice_t *device) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetHandleByUUID, uuid,
-                         device);
-}*/
-
 
 nvmlReturn_t nvmlDeviceGetInforomConfigurationChecksum(nvmlDevice_t device,
                                                        unsigned int *checksum) {
@@ -458,13 +407,7 @@ nvmlReturn_t nvmlDeviceGetMemoryErrorCounter(nvmlDevice_t device,
   return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetMemoryErrorCounter,
                          device, errorType, counterType, locationType, count);
 }
-/*
-nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device,
-                                     nvmlMemory_t *memory) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetMemoryInfo, device,
-                         memory);
-}
-*/
+
 nvmlReturn_t nvmlDeviceGetMinorNumber(nvmlDevice_t device,
                                       unsigned int *minorNumber) {
   return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetMinorNumber, device,
@@ -507,21 +450,6 @@ nvmlReturn_t nvmlDeviceGetNvLinkErrorCounter(nvmlDevice_t device,
   return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetNvLinkErrorCounter,
                          device, link, counter, counterValue);
 }
-/*
-nvmlReturn_t nvmlDeviceGetNvLinkRemotePciInfo_v2(nvmlDevice_t device,
-                                                 unsigned int link,
-                                                 nvmlPciInfo_t *pci) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry,
-                         nvmlDeviceGetNvLinkRemotePciInfo_v2, device, link,
-                         pci);
-}
-
-nvmlReturn_t nvmlDeviceGetNvLinkRemotePciInfo(nvmlDevice_t device,
-                                              unsigned int link,
-                                              nvmlPciInfo_t *pci) {
-  return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetNvLinkRemotePciInfo,
-                         device, link, pci);
-}*/
 
 nvmlReturn_t nvmlDeviceGetNvLinkState(nvmlDevice_t device, unsigned int link,
                                       nvmlEnableState_t *isActive) {
@@ -665,8 +593,6 @@ nvmlReturn_t nvmlDeviceGetSupportedEventTypes(nvmlDevice_t device,
                                               unsigned long long *eventTypes) {
   nvmlReturn_t res = NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetSupportedEventTypes,
                          device, eventTypes);
-  // nvmlReturn_t res = NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetSupportedEventTypes,
-  //                       device, eventTypes); 
   return res;
 }
 
@@ -876,10 +802,6 @@ nvmlReturn_t nvmlDeviceSetAutoBoostedClocksEnabled(nvmlDevice_t device,
 
 nvmlReturn_t nvmlDeviceSetComputeMode(nvmlDevice_t device,
                                       nvmlComputeMode_t mode) {
-  //if (g_vcuda_config.enable) {
-  //  return NVML_ERROR_NOT_SUPPORTED;
-  //}
-
   return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceSetComputeMode, device,
                          mode);
 }
@@ -1541,192 +1463,78 @@ nvmlComputeInstanceGetInfo_v2(nvmlComputeInstance_t computeInstance,
                          computeInstance, info);
 }
 
+/**
+ * Hooked nvmlDeviceGetComputeRunningProcesses_v2 — filters by cgroup/UID.
+ *
+ * Fetches the full process list from NVML, then returns only processes
+ * belonging to the current cgroup session or UID. Root sees all processes.
+ */
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
                                                      unsigned int *infoCount,
                                                      nvmlProcessInfo_t *infos) {
+  // External tools (nvidia-smi) call this; invalidate our cache so internal
+  // callers pick up the fresh data on their next query.
+  unsigned int dev_idx_for_invalidate;
+  if (NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetIndex,
+                         device, &dev_idx_for_invalidate) == NVML_SUCCESS) {
+    nvml_cache_invalidate((int)dev_idx_for_invalidate);
+  }
+
   // Get all processes first
   nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
   unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
-  
-  // CRITICAL: Initialize version field for all structs before calling NVML
-  // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-  // Try v2 first (newer format)
-  for (unsigned int i = 0; i < SHARED_REGION_MAX_PROCESS_NUM; i++) {
-    all_infos[i].version = nvmlProcessInfo_v2;
-  }
   
   nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
                          nvmlDeviceGetComputeRunningProcesses_v2, device,
                          &temp_count, all_infos);
   
-  // If v2 fails with invalid argument, try v1 as fallback (for older drivers)
-  if (ret == NVML_ERROR_INVALID_ARGUMENT) {
-    LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: v2 failed, trying v1 fallback");
-    temp_count = SHARED_REGION_MAX_PROCESS_NUM;
-    for (unsigned int i = 0; i < SHARED_REGION_MAX_PROCESS_NUM; i++) {
-      all_infos[i].version = nvmlProcessInfo_v1;
-    }
-    ret = NVML_OVERRIDE_CALL(nvml_library_entry,
-                           nvmlDeviceGetComputeRunningProcesses_v2, device,
-                           &temp_count, all_infos);
-    if (ret == NVML_SUCCESS || ret == NVML_ERROR_INSUFFICIENT_SIZE) {
-      LOG_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: v1 fallback succeeded");
-    }
-  }
-  
-  // Log if we didn't get the full process list
   if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
     LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v2: Buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.", 
              temp_count, SHARED_REGION_MAX_PROCESS_NUM);
   } else if (ret != NVML_SUCCESS) {
-    // If call failed, pass through the error
     LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v2: NVML call failed with error %d", ret);
     *infoCount = 0;
     return ret;
-  } else {
-    LOG_FILE_DEBUG("nvmlDeviceGetComputeRunningProcesses_v2: Successfully retrieved %u processes from NVML (buffer size %u)", 
-             temp_count, SHARED_REGION_MAX_PROCESS_NUM);
   }
   
-  // #region Detailed NVML struct logging - helps debug struct mismatches between CUDA headers and driver
-  // Log detailed information about NVML process structs to detect layout mismatches
-  // FILE ONLY - don't spam console with verbose struct dumps
-  // Only log detailed struct info on errors or very infrequently to avoid log spam
-  // This verbose logging runs every 120ms via utilization_watcher, so we throttle it
-  static unsigned int struct_log_counter = 0;
-  static unsigned int struct_log_interval = 100;  // Log every 100 calls (~12 seconds at 120ms intervals)
-  
-  if (++struct_log_counter >= struct_log_interval) {
-    struct_log_counter = 0;
-    LOG_FILE_DEBUG("RAW_NVML_HOOK: Received %u processes from NVML, struct_size=%zu bytes", 
-             temp_count, sizeof(nvmlProcessInfo_t));
-    
-    // Only log first process as sample
-    if (temp_count > 0) {
-      unsigned int safe_pid = extract_pid_safely((void *)&all_infos[0]);
-      
-      // Log struct fields as interpreted by headers
-      LOG_FILE_DEBUG("RAW_NVML_HOOK Process[0]: struct fields - version=%u pid=%u (0x%x) memory=%llu (0x%llx)", 
-                all_infos[0].version, all_infos[0].pid, all_infos[0].pid,
-                (unsigned long long)all_infos[0].usedGpuMemory,
-                (unsigned long long)all_infos[0].usedGpuMemory);
-      
-      // Log safe PID extraction result - always warn on mismatch (warnings go to console)
-      if (safe_pid != all_infos[0].pid && safe_pid != 0) {
-        LOG_WARN("RAW_NVML_HOOK Process[0]: STRUCT MISMATCH DETECTED - header pid=%u, safe_pid=%u (offset mismatch)", 
-                 all_infos[0].pid, safe_pid);
-      } else if (safe_pid == 0 && all_infos[0].pid > 0) {
-        LOG_WARN("RAW_NVML_HOOK Process[0]: INVALID PID - header pid=%u could not be validated", 
-                 all_infos[0].pid);
-      }
-    }
-  } else {
-    // Still check for mismatches on every call, but only log warnings (not debug spam)
-    // Check ALL processes for PID mismatches - we need to detect all issues
-    for (unsigned int i = 0; i < temp_count; i++) {  // Check ALL processes, not just first 2
-      unsigned int safe_pid = extract_pid_safely((void *)&all_infos[i]);
-      if (safe_pid != all_infos[i].pid && safe_pid != 0) {
-        // Log all mismatches to file (for debugging), but throttle console warnings
-        LOG_FILE_DEBUG("RAW_NVML_HOOK Process[%u]: STRUCT MISMATCH - header pid=%u, safe_pid=%u", 
-                     i, all_infos[i].pid, safe_pid);
-        
-        // Add raw bytes dump when mismatch detected (throttled to avoid spam)
-        static unsigned int raw_bytes_log_counter = 0;
-        if (++raw_bytes_log_counter % 50 == 0) {  // Log every 50th mismatch
-          unsigned char *raw = (unsigned char *)&all_infos[i];
-          LOG_FILE_DEBUG("RAW_NVML_HOOK Process[%u] PID %u raw_bytes[0-23]: "
-                        "%02x %02x %02x %02x %02x %02x %02x %02x "
-                        "%02x %02x %02x %02x %02x %02x %02x %02x "
-                        "%02x %02x %02x %02x %02x %02x %02x %02x",
-                        i, safe_pid,
-                        raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7],
-                        raw[8], raw[9], raw[10], raw[11], raw[12], raw[13], raw[14], raw[15],
-                        raw[16], raw[17], raw[18], raw[19], raw[20], raw[21], raw[22], raw[23]);
-        }
-        
-        // Only warn on console occasionally to avoid spam
-        static unsigned int mismatch_warn_counter = 0;
-        if (++mismatch_warn_counter % 100 == 0) {  // Throttle console warnings
-          LOG_WARN("RAW_NVML_HOOK Process[%u]: STRUCT MISMATCH - header pid=%u, safe_pid=%u", 
-                   i, all_infos[i].pid, safe_pid);
-        }
-      } else if (safe_pid == 0 && all_infos[i].pid > 0) {
-        // Log invalid PIDs too (file only to avoid spam)
-        LOG_FILE_DEBUG("RAW_NVML_HOOK Process[%u]: INVALID PID - header pid=%u could not be validated", 
-                     i, all_infos[i].pid);
-      }
-    }
-  }
-  // #endregion
-  
-  // Filter by current cgroup session (or UID if not in cgroup, unless root)
+  // Filter by cgroup session for all users (including root).
+  // Root still falls back to include-all if cgroup detection fails.
   uid_t current_uid = getuid();
   unsigned int filtered_count = 0;
-  unsigned int max_output = *infoCount;  // Save the output buffer size
-  int is_root = (current_uid == 0);  // Root user (UID 0) sees all processes
-  
-  
-  // Iterate through ALL processes and filter by cgroup session or UID (unless root)
+  unsigned int max_output = *infoCount;
+
   for (unsigned int i = 0; i < temp_count; i++) {
-    if (is_root) {
-      // Root user sees all processes - include all
-      if (infos != NULL && filtered_count < max_output) {
-        infos[filtered_count] = all_infos[i];
-      }
-      filtered_count++;
-      if (filtered_count >= max_output && infos != NULL) {
-        break;
-      }
-    } else {
-      // Non-root users: filter by cgroup session first, fall back to UID
-      // CRITICAL: Use safe PID extraction to handle struct mismatches
-      unsigned int actual_pid = extract_pid_safely((void *)&all_infos[i]);
-      if (actual_pid == 0) {
-        continue;  // Skip if we can't get a valid PID
-      }
-      
-      int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
-      int should_include = 0;
-      
-      if (cgroup_check == 1) {
-        // Process belongs to current cgroup session - include it
+    unsigned int actual_pid = all_infos[i].pid;
+    if (actual_pid == 0) continue;
+
+    int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
+    int should_include = 0;
+
+    if (cgroup_check == 1) {
+      should_include = 1;
+    } else if (cgroup_check == -1) {
+      if (current_uid == 0) {
         should_include = 1;
-      } else if (cgroup_check == -1) {
-        // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
+      } else {
         uid_t proc_uid = proc_get_uid(actual_pid);
-        
-        if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
+        if (proc_uid != (uid_t)-1 && proc_uid == current_uid)
           should_include = 1;
-        }
-      }
-      
-      if (should_include) {
-        if (infos != NULL && filtered_count < max_output) {
-          infos[filtered_count] = all_infos[i];
-        }
-        filtered_count++;
-        // Stop if output buffer is full
-        if (filtered_count >= max_output && infos != NULL) {
-          break;
-        }
       }
     }
+
+    if (should_include) {
+      if (infos != NULL && filtered_count < max_output)
+        infos[filtered_count] = all_infos[i];
+      filtered_count++;
+      if (filtered_count >= max_output && infos != NULL) break;
+    }
   }
-  
-  
+
   *infoCount = filtered_count;
-  
-  // Return appropriate status
-  if (ret == NVML_ERROR_INSUFFICIENT_SIZE || (!is_root && filtered_count < temp_count)) {
-    // Some processes were filtered out, but we have results
-    return NVML_SUCCESS;
-  }
-  
-  return ret;
+  return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
 }
 nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
-  // Get all processes first
   nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
   unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
   
@@ -1735,106 +1543,49 @@ nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
                          &temp_count, all_infos);
   
   if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
-    // If call failed, pass through the error
     *infoCount = 0;
     return ret;
   }
   
-  // Filter by current cgroup session (or UID if not in cgroup, unless root)
   uid_t current_uid = getuid();
   unsigned int filtered_count = 0;
-  unsigned int max_output = *infoCount;  // Save the output buffer size
-  int is_root = (current_uid == 0);  // Root user (UID 0) sees all processes
-  
-  // Iterate through ALL processes and filter by cgroup session or UID (unless root)
+  unsigned int max_output = *infoCount;
+
   for (unsigned int i = 0; i < temp_count; i++) {
-    if (is_root) {
-      // Root user sees all processes - include all
-      if (infos != NULL && filtered_count < max_output) {
-        infos[filtered_count] = all_infos[i];
-      }
-      filtered_count++;
-      if (filtered_count >= max_output && infos != NULL) {
-        break;
-      }
-    } else {
-      // Non-root users: filter by cgroup session first, fall back to UID
-      // CRITICAL: Use safe PID extraction to handle struct mismatches
-      unsigned int actual_pid = extract_pid_safely((void *)&all_infos[i]);
-      if (actual_pid == 0) {
-        continue;  // Skip if we can't get a valid PID
-      }
-      
-      LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] - PID=%u, usedGpuMemory=%llu bytes", 
-               i, actual_pid, (unsigned long long)all_infos[i].usedGpuMemory, 
-               (unsigned long long)all_infos[i].usedGpuMemory);
-      
-      int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
-      
-      LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - cgroup_check=%d", 
-               i, actual_pid, cgroup_check);
-      
-      int should_include = 0;
-      
-      if (cgroup_check == 1) {
-        // Process belongs to current cgroup session - include it
+    unsigned int actual_pid = all_infos[i].pid;
+    if (actual_pid == 0) continue;
+
+    int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
+    int should_include = 0;
+
+    if (cgroup_check == 1) {
+      should_include = 1;
+    } else if (cgroup_check == -1) {
+      if (current_uid == 0) {
         should_include = 1;
-        uid_t proc_uid = proc_get_uid(actual_pid);
-        LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same cgroup, proc_uid=%u current_uid=%u)", 
-                 i, actual_pid, proc_uid, current_uid);
-      } else if (cgroup_check == -1) {
-        // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
-        uid_t proc_uid = proc_get_uid(actual_pid);
-        
-        LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - cgroup unavailable, checking UID: proc_uid=%u current_uid=%u", 
-                 i, actual_pid, proc_uid, current_uid);
-        if (proc_uid != (uid_t)-1 && proc_uid == current_uid) {
-          should_include = 1;
-          LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - INCLUDING (same UID %u, cgroup unavailable)", 
-                   i, actual_pid, proc_uid);
-        } else {
-          LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (UID %u != current %u)", 
-                   i, actual_pid, proc_uid, current_uid);
-        }
       } else {
-        // cgroup_check == 0 means different cgroup session - exclude it
         uid_t proc_uid = proc_get_uid(actual_pid);
-        LOG_DEBUG("nvmlDeviceGetGraphicsRunningProcesses_v2: Process[%u] PID %u - EXCLUDING (different cgroup session, proc_uid=%u current_uid=%u)", 
-                 i, actual_pid, proc_uid, current_uid);
-      }
-      
-      if (should_include) {
-        if (infos != NULL && filtered_count < max_output) {
-          infos[filtered_count] = all_infos[i];
-        }
-        filtered_count++;
-        // Stop if output buffer is full
-        if (filtered_count >= max_output && infos != NULL) {
-          break;
-        }
+        if (proc_uid != (uid_t)-1 && proc_uid == current_uid)
+          should_include = 1;
       }
     }
+
+    if (should_include) {
+      if (infos != NULL && filtered_count < max_output)
+        infos[filtered_count] = all_infos[i];
+      filtered_count++;
+      if (filtered_count >= max_output && infos != NULL) break;
+    }
   }
-  
+
   *infoCount = filtered_count;
-  
-  // Return appropriate status
-  if (ret == NVML_ERROR_INSUFFICIENT_SIZE || (!is_root && filtered_count < temp_count)) {
-    // Some processes were filtered out, but we have results
-    return NVML_SUCCESS;
-  }
-  
-  return ret;
+  return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
 }
 nvmlReturn_t nvmlDeviceSetTemperatureThreshold(
     nvmlDevice_t device, nvmlTemperatureThresholds_t thresholdType, int *temp) {
   return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceSetTemperatureThreshold,
                          device, thresholdType, temp);
 }
-
-/** no prototype
-nvmlReturn_t nvmlRetry_NvRmControl() {}
- */
 
 nvmlReturn_t nvmlVgpuInstanceGetGpuInstanceId(nvmlVgpuInstance_t vgpuInstance,
                                               unsigned int *gpuInstanceId) {

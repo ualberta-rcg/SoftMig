@@ -17,7 +17,8 @@ set -euo pipefail
 # Configuration: Number of shards per GPU (must match job_submit.lua NUM_SHARDS)
 NUM_SHARDS_PER_GPU=4
 
-REQ_TRES=$(scontrol show job ${SLURM_JOB_ID} --json | jq ".jobs[0].tres_req_str")
+JOB_JSON=$(scontrol show job ${SLURM_JOB_ID} --json)
+REQ_TRES=$(echo "$JOB_JSON" | jq ".jobs[0].tres_req_str")
 
 # Check partition name since SLURM_JOB_GRES isn't always set for srun
 if [[ "${REQ_TRES:-}" == *"gres/shard"* ]]; then
@@ -26,8 +27,17 @@ if [[ "${REQ_TRES:-}" == *"gres/shard"* ]]; then
     chown root:root /var/run/softmig
     chmod 755 /var/run/softmig
 
-    # Build config file path
-    CONFIG_FILE="/var/run/softmig/${SLURM_JOB_ID}.conf"
+    # Build config file path (include array task ID if this is an array job).
+    # SLURM_ARRAY_TASK_ID is not always set in the prolog environment,
+    # so extract it from the scontrol --json we already fetched.
+    ARRAY_TASK_ID=$(echo "$JOB_JSON" | jq -r '.jobs[0].array_task_id.number // empty' 2>/dev/null || echo "")
+    CONFIG_FILE="/var/run/softmig/${SLURM_JOB_ID}"
+    if [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
+        CONFIG_FILE="${CONFIG_FILE}_${SLURM_ARRAY_TASK_ID}"
+    elif [[ -n "${ARRAY_TASK_ID:-}" ]] && [[ "$ARRAY_TASK_ID" != "null" ]]; then
+        CONFIG_FILE="${CONFIG_FILE}_${ARRAY_TASK_ID}"
+    fi
+    CONFIG_FILE="${CONFIG_FILE}.conf"
     
     # Get total GPU memory from first GPU using nvidia-smi (in MB, convert to GB)
     TOTAL_GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i 0 2>/dev/null | head -n1 || echo "")

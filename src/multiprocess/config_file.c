@@ -1,7 +1,11 @@
-// Config file reader for softmig
-// Reads secure config from /var/run/softmig/{jobid}_{arrayid}.conf
-// Falls back to environment variables if config file doesn't exist
-
+/**
+ * @file config_file.c
+ * @brief Secure config file reader for per-job GPU limits.
+ *
+ * Reads memory and SM limits from /var/run/softmig/{jobid}.conf (written by
+ * the SLURM prolog). Falls back to environment variables for non-SLURM runs.
+ * Results are cached to avoid repeated file I/O.
+ */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,7 +14,15 @@
 #include <errno.h>
 #include "include/log_utils.h"
 
-// Get config file path for current SLURM job
+static int is_numeric(const char *s) {
+    if (s == NULL || *s == '\0') return 0;
+    for (; *s; s++) {
+        if (*s < '0' || *s > '9') return 0;
+    }
+    return 1;
+}
+
+/** Build /var/run/softmig/{jobid}.conf path, validating SLURM_JOB_ID is numeric. */
 static char* get_config_file_path(void) {
     static char config_path[512] = {0};
     static int initialized = 0;
@@ -23,15 +35,28 @@ static char* get_config_file_path(void) {
     char* array_id = getenv("SLURM_ARRAY_TASK_ID");
     
     if (job_id == NULL) {
-        // Not in SLURM job - no config file
         config_path[0] = '\0';
         initialized = 1;
         return config_path;
     }
+
+    if (!is_numeric(job_id)) {
+        LOG_WARN("SLURM_JOB_ID contains non-numeric characters: '%s', ignoring config file", job_id);
+        config_path[0] = '\0';
+        initialized = 1;
+        return config_path;
+    }
+    if (array_id != NULL && strlen(array_id) > 0 && !is_numeric(array_id)) {
+        LOG_WARN("SLURM_ARRAY_TASK_ID contains non-numeric characters: '%s', ignoring", array_id);
+        array_id = NULL;
+    }
     
-    // Build path: /var/run/softmig/{jobid}_{arrayid}.conf or /var/run/softmig/{jobid}.conf
     if (array_id != NULL && strlen(array_id) > 0) {
         snprintf(config_path, sizeof(config_path), "/var/run/softmig/%s_%s.conf", job_id, array_id);
+        struct stat st;
+        if (lstat(config_path, &st) != 0) {
+            snprintf(config_path, sizeof(config_path), "/var/run/softmig/%s.conf", job_id);
+        }
     } else {
         snprintf(config_path, sizeof(config_path), "/var/run/softmig/%s.conf", job_id);
     }
@@ -40,17 +65,33 @@ static char* get_config_file_path(void) {
     return config_path;
 }
 
-// Read a value from config file (key=value format)
-// Returns 1 if found, 0 if not found
+/** Read a key=value pair from config, with symlink and ownership checks. */
 static int read_config_value(const char* key, char* value, size_t value_size) {
     char* config_path = get_config_file_path();
     if (config_path[0] == '\0') {
-        return 0;  // No config file
+        return 0;
+    }
+
+    struct stat st;
+    if (lstat(config_path, &st) != 0) {
+        return 0;
+    }
+    if (S_ISLNK(st.st_mode)) {
+        LOG_WARN("Config file is a symlink, refusing to read: %s", config_path);
+        return 0;
+    }
+    if (!S_ISREG(st.st_mode)) {
+        LOG_WARN("Config file is not a regular file: %s", config_path);
+        return 0;
+    }
+    if (st.st_uid != 0) {
+        LOG_WARN("Config file not owned by root (uid=%u): %s", st.st_uid, config_path);
+        return 0;
     }
     
     FILE* f = fopen(config_path, "r");
     if (f == NULL) {
-        return 0;  // Config file doesn't exist
+        return 0;
     }
     
     char line[1024];
@@ -90,9 +131,12 @@ static struct {
     int cached;
 } config_cache[MAX_CACHED_KEYS] = {0};
 
-// Get limit from config file or environment variable
-// Priority: config file > environment variable
-// Results are cached to avoid reading the file multiple times
+/**
+ * Read a GPU limit from the SLURM prolog config file, falling back to env vars.
+ *
+ * Priority: /var/run/softmig/{jobid}.conf > env var (non-SLURM only).
+ * Parses human-readable sizes (e.g. "16g", "24G", "512M"). Results are cached.
+ */
 size_t get_limit_from_config_or_env(const char* env_name) {
     // Check cache first
     for (int i = 0; i < MAX_CACHED_KEYS; i++) {
@@ -146,7 +190,12 @@ size_t get_limit_from_config_or_env(const char* env_name) {
         LOG_DEBUG("Read %s=%s from config file", env_name, config_value);
         result = scaled_res;
     } else {
-        // Fallback to environment variable (for non-SLURM or if config file doesn't exist)
+        // In SLURM jobs, prolog-generated config files are the source of truth.
+        // Do not fall back to user environment variables when a job ID exists.
+        if (getenv("SLURM_JOB_ID") != NULL) {
+            result = 0;
+        } else {
+        // Fallback to environment variable for non-SLURM runs (local testing)
         char* env_limit = getenv(env_name);
         if (env_limit == NULL) {
             result = 0;
@@ -189,14 +238,16 @@ size_t get_limit_from_config_or_env(const char* env_name) {
                 }
             }
         }
+        }
     }
     
-    // Cache the result
+    // Cache the result (write key+value before setting the flag visible to readers)
     for (int i = 0; i < MAX_CACHED_KEYS; i++) {
         if (!config_cache[i].cached) {
             strncpy(config_cache[i].key, env_name, sizeof(config_cache[i].key) - 1);
             config_cache[i].key[sizeof(config_cache[i].key) - 1] = '\0';
             config_cache[i].value = result;
+            __sync_synchronize();
             config_cache[i].cached = 1;
             break;
         }
@@ -205,8 +256,7 @@ size_t get_limit_from_config_or_env(const char* env_name) {
     return result;
 }
 
-// Check if softmig should be active (either CUDA_DEVICE_MEMORY_LIMIT or CUDA_DEVICE_SM_LIMIT is set)
-// Returns 1 if at least one is set, 0 if neither is set
+/** Return 1 if either CUDA_DEVICE_MEMORY_LIMIT or CUDA_DEVICE_SM_LIMIT is configured. */
 int is_softmig_configured(void) {
     // Check if CUDA_DEVICE_MEMORY_LIMIT is set (from config file or environment)
     size_t memory_limit = get_limit_from_config_or_env("CUDA_DEVICE_MEMORY_LIMIT");

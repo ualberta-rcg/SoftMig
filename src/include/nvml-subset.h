@@ -46,6 +46,13 @@
  * comments to the code, the above Disclaimer and U.S. Government End
  * Users Notice.
  */
+/**
+ * @file nvml-subset.h
+ * @brief Standalone NVML type definitions to avoid linking against the full NVML header.
+ *
+ * Contains a minimal reproduction of NVML structs, enums, and constants needed
+ * by SoftMig. This avoids conflicts with the system nvml.h when hooking.
+ */
 #ifndef HIJACK_DRIVER_SUBSET_H
 #define HIJACK_DRIVER_SUBSET_H
 
@@ -73,17 +80,17 @@ extern "C" {
 
 typedef struct nvmlDevice_st *nvmlDevice_t;
 
-// Version constants for nvmlProcessInfo_t
-#define nvmlProcessInfo_v1 1
-#define nvmlProcessInfo_v2 2
+typedef struct nvmlProcessInfo_v1_st {
+  unsigned int pid;
+  unsigned long long usedGpuMemory;
+} nvmlProcessInfo_v1_t;
 
-typedef struct nvmlProcessInfo_st {
-  unsigned int version;              //!< Structure format version (must be set before API calls)
-  unsigned int pid;                  //!< Process ID
-  unsigned long long usedGpuMemory;  //!< Amount of used GPU memory in bytes.
-  //! Under WDDM, \ref NVML_VALUE_NOT_AVAILABLE is always reported
-  //! because Windows KMD manages all the memory and not the NVIDIA driver
-} nvmlProcessInfo_t;
+typedef struct nvmlProcessInfo_v2_st {
+  unsigned int pid;
+  unsigned long long usedGpuMemory;
+  unsigned int gpuInstanceId;
+  unsigned int computeInstanceId;
+} nvmlProcessInfo_v2_t, nvmlProcessInfo_t;
 
 /**
  * Return values for NVML API calls.

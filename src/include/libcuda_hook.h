@@ -1,3 +1,11 @@
+/**
+ * @file libcuda_hook.h
+ * @brief CUDA driver API hook table and dispatch macros.
+ *
+ * Defines the cuda_entry_t dispatch table, the CUDA_OVERRIDE_CALL macro
+ * for invoking real CUDA driver functions, and the enum indexing every
+ * hooked CUDA symbol (device, context, memory, stream, graph, etc.).
+ */
 #ifndef __LIBCUDA_HOOK_H__
 #define __LIBCUDA_HOOK_H__
 
@@ -21,8 +29,6 @@ typedef struct {
 } cuda_entry_t;
 
 #define FILENAME_MAX 4096
-
-#define CONTEXT_SIZE 104857600
 
 typedef CUresult (*cuda_sym_t)();
 

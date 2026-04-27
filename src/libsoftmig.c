@@ -1,3 +1,12 @@
+/**
+ * @file libsoftmig.c
+ * @brief Main SoftMig library entry point — dlsym hook, CUDA/NVML dispatch, initialization.
+ *
+ * Interposes dlsym so that every cu* and nvml* symbol lookup returns
+ * SoftMig's hooked version. On first cuInit, loads the real CUDA and NVML
+ * libraries, initializes the shared memory region, detects the host PID,
+ * sets up the allocator, and starts the utilization watcher thread.
+ */
 #include <fcntl.h>
 #include <dlfcn.h>
 #include <pthread.h>
@@ -9,6 +18,7 @@
 #include "include/libsoftmig.h"
 #include "include/utils.h"
 #include "include/nvml_override.h"
+#include "include/dlsym_resolve.h"
 #include "allocator/allocator.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
@@ -67,61 +77,17 @@ int check_dlmap(pthread_t tid, void *pointer){
     return 0;
 }
 
-// Helper to get real dlsym without recursion
-static fp_dlsym get_real_dlsym_safe(void) {
-    fp_dlsym result = NULL;
-    
-    // Method 1: Try dlvsym with RTLD_NEXT (most reliable, avoids our hook)
-    result = dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
-    if (result == NULL) {
-        result = dlvsym(RTLD_NEXT, "dlsym", "");
-    }
-    if (result == NULL) {
-        const char *glibc_versions[] = {"GLIBC_2.34", "GLIBC_2.17", "GLIBC_2.4", NULL};
-        for (int i = 0; glibc_versions[i] != NULL && result == NULL; i++) {
-            result = dlvsym(RTLD_NEXT, "dlsym", glibc_versions[i]);
-        }
-    }
-    
-    // Method 2: Try dlvsym with RTLD_DEFAULT (system default namespace)
-    if (result == NULL) {
-        result = dlvsym(RTLD_DEFAULT, "dlsym", "");
-        if (result == NULL) {
-            result = dlvsym(RTLD_DEFAULT, "dlsym", "GLIBC_2.2.5");
-        }
-    }
-    
-    // Method 3: Try getting dlsym from libdl.so.2 directly via dlvsym
-    if (result == NULL) {
-        void *libdl = dlopen("libdl.so.2", RTLD_LAZY | RTLD_LOCAL);
-        if (libdl != NULL) {
-            // Get dlsym symbol directly from libdl using dlvsym
-            result = (fp_dlsym)dlvsym(libdl, "dlsym", "");
-            if (result == NULL) {
-                result = (fp_dlsym)dlvsym(libdl, "dlsym", "GLIBC_2.2.5");
-            }
-            // Note: We keep libdl open, closing it might cause issues
-        }
-    }
-    
-    // Last resort: try _dl_sym if available (weak symbol, may not exist)
-    if (result == NULL) {
-        #ifdef __GLIBC__
-        extern void* _dl_sym(void*, const char*, void*) __attribute__((weak));
-        if (_dl_sym != NULL) {
-            result = (fp_dlsym)_dl_sym(RTLD_NEXT, "dlsym", (void*)dlsym);
-        }
-        #endif
-    }
-    
-    return result;
-}
-
+/**
+ * Interposed dlsym — redirects cu* and nvml* lookups to SoftMig hook functions.
+ *
+ * Uses dlvsym to obtain the real dlsym on first call, avoiding infinite
+ * recursion. For RTLD_NEXT handles, detects and breaks recursive chains.
+ */
 FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     // Reduced logging - dlsym is called very frequently
     pthread_once(&dlsym_init_flag,init_dlsym);
     if (real_dlsym == NULL) {
-        real_dlsym = get_real_dlsym_safe();
+        real_dlsym = resolve_real_dlsym();
         
         if (real_dlsym == NULL) {
             LOG_ERROR("real dlsym not found - all methods failed. softmig will not work.");
@@ -149,7 +115,7 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
     // If we don't have real_dlsym, we can't hook properly - just fail gracefully
     if (real_dlsym == NULL) {
         // Try to get it one more time
-        real_dlsym = get_real_dlsym_safe();
+        real_dlsym = resolve_real_dlsym();
         if (real_dlsym == NULL) {
             // Last resort: try to call system dlsym via dlvsym (may not work but won't crash)
             fp_dlsym sys_dlsym = (fp_dlsym)dlvsym(RTLD_DEFAULT, "dlsym", "");
@@ -266,7 +232,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuCtxGetDevice);
     DLSYM_HOOK_FUNC(cuDeviceGetAttribute);
     DLSYM_HOOK_FUNC(cuDeviceGetCount);
-    DLSYM_HOOK_FUNC(cuDeviceGet);
     DLSYM_HOOK_FUNC(cuDeviceGetName);
     DLSYM_HOOK_FUNC(cuDeviceCanAccessPeer);
     DLSYM_HOOK_FUNC(cuDeviceGetP2PAttribute);
@@ -301,7 +266,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuMemcpyDtoA_v2);
     DLSYM_HOOK_FUNC(cuMemcpyDtoDAsync_v2);
     DLSYM_HOOK_FUNC(cuMemcpyDtoD_v2);
-    DLSYM_HOOK_FUNC(cuMemcpyDtoDAsync_v2);
     DLSYM_HOOK_FUNC(cuMemcpyDtoH_v2);
     DLSYM_HOOK_FUNC(cuMemcpyDtoHAsync_v2);
     DLSYM_HOOK_FUNC(cuMemcpyHtoD_v2);
@@ -922,15 +886,17 @@ void* __dlsym_hook_section_nvml(void* handle, const char* symbol) {
     return NULL;
 }
 
+/** Pre-cuInit: resolve real dlsym, load CUDA libraries, ensure shared region is initialized. */
 void preInit(){
     LOG_MSG("Initializing.....");
     if (real_dlsym == NULL) {
-        real_dlsym = get_real_dlsym_safe();
+        real_dlsym = resolve_real_dlsym();
     }
     load_cuda_libraries();
     ENSURE_INITIALIZED();
 }
 
+/** Post-cuInit: init allocator, map devices, detect host PID, start utilization watcher. */
 void postInit(){
     allocator_init();
     map_cuda_visible_devices();
@@ -945,7 +911,7 @@ void postInit(){
         pidfound=1;
     }
 
-    env_utilization_switch = set_env_utilization_switch();
+    env_utilization_switch = 1;
     init_utilization_watcher();
 }
 

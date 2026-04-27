@@ -1,12 +1,19 @@
+/**
+ * @file context.c
+ * @brief CUDA context hooks with memory tracking for primary context retain/release.
+ *
+ * Intercepts cuDevicePrimaryCtxRetain and cuDevicePrimaryCtxRelease to track
+ * the GPU memory consumed by the CUDA context itself. All other context
+ * functions are thin pass-through wrappers.
+ */
 #include "include/libcuda_hook.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
 extern size_t context_size;
-extern int ctx_activate[16];
+extern int ctx_activate[CTX_ACTIVATE_SIZE];
 
 
 CUresult cuDevicePrimaryCtxGetState( CUdevice dev, unsigned int* flags, int* active ){
-    LOG_DEBUG("into cuDevicePrimaryCtxGetState dev=%d",dev);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDevicePrimaryCtxGetState,dev,flags,active);
     return res;
 }
@@ -14,6 +21,10 @@ CUresult cuDevicePrimaryCtxGetState( CUdevice dev, unsigned int* flags, int* act
 CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev){
     //for Initialization only
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDevicePrimaryCtxRetain,pctx,dev);
+    if (dev < 0 || dev >= CTX_ACTIVATE_SIZE) {
+        LOG_WARN("cuDevicePrimaryCtxRetain: device %d out of ctx_activate bounds", dev);
+        return res;
+    }
     if (ctx_activate[dev] == 0) {
         add_gpu_device_memory_usage(getpid(),dev,context_size,0); 
     }
@@ -25,11 +36,14 @@ CUresult cuDevicePrimaryCtxRetain(CUcontext *pctx, CUdevice dev){
 
 
 CUresult cuDevicePrimaryCtxSetFlags_v2( CUdevice dev, unsigned int  flags ){
-    LOG_DEBUG("into cuDevicePrimaryCtxSetFlags dev=%d flags=%d",dev,flags);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuDevicePrimaryCtxSetFlags_v2,dev,flags);
 }
 
 CUresult cuDevicePrimaryCtxRelease_v2( CUdevice dev ){
+    if (dev < 0 || dev >= CTX_ACTIVATE_SIZE) {
+        LOG_WARN("cuDevicePrimaryCtxRelease_v2: device %d out of ctx_activate bounds", dev);
+        return CUDA_OVERRIDE_CALL(cuda_library_entry,cuDevicePrimaryCtxRelease_v2,dev);
+    }
     if (ctx_activate[dev] == 1) {
         rm_gpu_device_memory_usage(getpid(),dev,context_size,0);
     }
@@ -69,7 +83,6 @@ CUresult cuCtxGetApiVersion ( CUcontext ctx, unsigned int* version ){
 }
 
 CUresult cuCtxGetCacheConfig ( CUfunc_cache* pconfig ){
-    LOG_DEBUG("into cuCtxGetCacheConfig");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetCacheConfig,pconfig);
 }
 
@@ -79,17 +92,14 @@ CUresult cuCtxGetCurrent ( CUcontext* pctx ){
 }
 
 CUresult cuCtxGetFlags ( unsigned int* flags ){
-    LOG_DEBUG("into cuCtxGetFlags flags=%p",flags);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetFlags,flags);
 }
 
 CUresult cuCtxGetLimit ( size_t* pvalue, CUlimit limit ){
-    LOG_DEBUG("into cuCtxGetLimit pvalue=%p",pvalue);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetLimit,pvalue,limit);
 }
 
 CUresult cuCtxGetSharedMemConfig ( CUsharedconfig* pConfig ){
-    LOG_DEBUG("cuCtxGetSharedMemConfig pConfig=%p",pConfig);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetSharedMemConfig,pConfig);
 }
 
@@ -110,30 +120,26 @@ CUresult cuCtxPushCurrent_v2 ( CUcontext ctx ){
 }
 
 CUresult cuCtxSetCacheConfig ( CUfunc_cache config ){
-    LOG_DEBUG("cuCtxSetCacheConfig config=%d",config);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxSetCacheConfig,config);
 }
 
 CUresult cuCtxSetCurrent ( CUcontext ctx ){
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxSetCurrent,ctx);
     if (res!=CUDA_SUCCESS){
-        LOG_ERROR("cuCtxSetCurrent111 failed res=%d ctx=%p",res,ctx);
+        LOG_ERROR("cuCtxSetCurrent failed res=%d ctx=%p",res,ctx);
     }
     return res;
 }
 
 CUresult cuCtxSetLimit ( CUlimit limit, size_t value ){
-    LOG_DEBUG("cuCtxSetLimit");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxSetLimit,limit,value);
 }
 
 CUresult cuCtxSetSharedMemConfig ( CUsharedconfig config ){
-    LOG_DEBUG("cuCtxSetSharedMemConfig");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxSetSharedMemConfig,config);
 }
 
 CUresult cuCtxSynchronize ( void ){
-    LOG_DEBUG("INTO CtxSync");
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxSynchronize);
     return res;
 }

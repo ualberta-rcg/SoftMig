@@ -1,3 +1,11 @@
+/**
+ * @file device.c
+ * @brief CUDA device hooks with memory limit enforcement on cuDeviceTotalMem.
+ *
+ * Intercepts cuDeviceTotalMem_v2 to report the per-device memory limit
+ * instead of the physical GPU memory. All other device query functions
+ * are thin pass-through wrappers.
+ */
 #include "include/libcuda_hook.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 #include "include/nvml_prefix.h"
@@ -19,14 +27,11 @@ CUresult cuDeviceGet(CUdevice *device,int ordinal){
 }
 
 CUresult cuDeviceGetCount( int* count ) {
-    LOG_DEBUG("into cuDeviceGetCount");
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetCount,count);
-    LOG_DEBUG("cuDeviceGetCount res=%d count=%d",res,*count);
     return res;
 }
 
 CUresult cuDeviceGetName(char *name, int len, CUdevice dev) {
-    LOG_DEBUG("into cuDeviceGetName");
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceGetName, name, len, dev);
     return res;
 }
@@ -37,7 +42,6 @@ CUresult cuDeviceCanAccessPeer( int* canAccessPeer, CUdevice dev, CUdevice peerD
 
 CUresult cuDeviceGetP2PAttribute(int *value, CUdevice_P2PAttribute attrib,
                                  CUdevice srcDevice, CUdevice dstDevice) {
-    LOG_DEBUG("into cuDeviceGetP2PAttribute\n");
     return CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceGetP2PAttribute, value,
                          attrib, srcDevice, dstDevice);
 }
@@ -54,25 +58,21 @@ CUresult cuDeviceGetPCIBusId(char *pciBusId, int len, CUdevice dev) {
 }
 
 CUresult cuDeviceGetUuid(CUuuid* uuid,CUdevice dev) {
-    LOG_DEBUG("into cuDeviceGetUuid dev=%d",dev);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetUuid,uuid,dev);
     return res;
 }
 
 CUresult cuDeviceGetDefaultMemPool(CUmemoryPool *pool_out, CUdevice dev) {
-    LOG_DEBUG("cuDeviceGetDefaultMemPool");
     return CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceGetDefaultMemPool,
                          pool_out, dev);
 }
 
 CUresult cuDeviceGetMemPool(CUmemoryPool *pool, CUdevice dev){
-    LOG_DEBUG("cuDeviceGetMemPool");
     return CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceGetMemPool, pool, dev);
 }
 
 CUresult cuDeviceGetLuid(char *luid, unsigned int *deviceNodeMask,
                          CUdevice dev) {
-  LOG_DEBUG("cuDeviceGetLuid");
   return CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceGetLuid, luid,
                          deviceNodeMask, dev);
 }
@@ -86,8 +86,6 @@ CUresult cuDeviceTotalMem_v2 ( size_t* bytes, CUdevice dev ) {
 }
 
 CUresult cuDriverGetVersion(int *driverVersion) {
-    LOG_DEBUG("into cuDriverGetVersion__");
-    
     //stub dlsym to prelaod cuda functions
     dlsym(RTLD_DEFAULT,"cuDriverGetVersion");
 
@@ -99,16 +97,13 @@ CUresult cuDriverGetVersion(int *driverVersion) {
 }
 
 CUresult cuDeviceGetTexture1DLinearMaxWidth(size_t *maxWidthInElements, CUarray_format format, unsigned numChannels, CUdevice dev){
-    LOG_DEBUG("cuDeviceGetTexture1DLinearMaxWidth");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetTexture1DLinearMaxWidth,maxWidthInElements,format,numChannels,dev);
 }
 
 CUresult cuDeviceSetMemPool(CUdevice dev, CUmemoryPool pool) {
-    LOG_DEBUG("cuDeviceSetMemPool");
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceSetMemPool,dev,pool);
 }
 
 CUresult cuFlushGPUDirectRDMAWrites(CUflushGPUDirectRDMAWritesTarget target, CUflushGPUDirectRDMAWritesScope scope) {
-   LOG_DEBUG("cuFlushGPUDirectRDMAWrites");
    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuFlushGPUDirectRDMAWrites,target,scope);
 }

@@ -1,7 +1,18 @@
+/**
+ * @file multiprocess_utilization_watcher.c
+ * @brief Token-bucket SM rate limiter and background utilization/memory monitoring thread.
+ *
+ * Implements the rate_limiter that throttles CUDA kernel launches to enforce
+ * SM utilization limits. A background pthread polls NVML every ~120 ms for
+ * per-process SM utilization and adjusts the token pool accordingly. Every
+ * ~5 seconds it also checks memory usage against limits and triggers the
+ * gradual OOM killer if needed.
+ */
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/stat.h>
+#include <syslog.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,17 +37,6 @@
 #include "include/log_utils.h"
 #include "include/nvml_override.h"
 #include "include/process_utils.h"
-
-// Local versioned struct definition to avoid including nvml-subset.h (which conflicts with system nvml.h)
-// This matches the v2 struct layout expected by the driver NVML library
-#define NVML_PROCESS_INFO_V1 1
-#define NVML_PROCESS_INFO_V2 2
-typedef struct {
-    unsigned int version;              //!< Structure format version (must be set before API calls)
-    unsigned int pid;                  //!< Process ID
-    unsigned long long usedGpuMemory;  //!< Amount of used GPU memory in bytes
-} nvmlProcessInfo_v2_local_t;
-
 
 static int g_sm_num;
 static int g_max_thread_per_sm;
@@ -121,7 +121,7 @@ long delta(int up_limit, int user_current, long share) {
   return share;
 }
 
-unsigned int nvml_to_cuda_map(unsigned int nvmldev){
+int nvml_to_cuda_map(unsigned int nvmldev){
     unsigned int devcount;
     CHECK_NVML_API(nvmlDeviceGetCount_v2(&devcount));
     int i=0;
@@ -144,15 +144,13 @@ int setspec() {
     return 0;
 }
 
-int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
+int get_used_gpu_utilization(int *userutil) {
     struct timeval cur;
     size_t microsec;
 
     int i;
     unsigned int infcount;
-    // Use local versioned struct that's compatible with driver NVML v2 API
-    // This avoids conflicts between nvml-subset.h and system nvml.h
-    nvmlProcessInfo_v2_local_t infos[SHARED_REGION_MAX_PROCESS_NUM];
+    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
 
     unsigned int nvmlCounts;
     CHECK_NVML_API(nvmlDeviceGetCount(&nvmlCounts));
@@ -170,19 +168,8 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
       nvmlDevice_t device;
       CHECK_NVML_API(nvmlDeviceGetHandleByIndex(cudadev, &device));
 
-      // CRITICAL: Initialize version field for all structs before calling NVML
-      // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-      for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
-          infos[j].version = NVML_PROCESS_INFO_V2;
-          infos[j].pid = 0;
-          infos[j].usedGpuMemory = 0;
-      }
-
       //Get Memory for container
-      // Note: This goes through our hook (nvmlDeviceGetComputeRunningProcesses_v2) which expects versioned structs.
-      // Cast to match system header signature - the memory layout is compatible since v2 struct
-      // is just v1 struct with a version field prepended: {version, pid, usedGpuMemory}
-      nvmlReturn_t res = nvmlDeviceGetComputeRunningProcesses(device,&infcount,(nvmlProcessInfo_v1_t *)infos);
+      nvmlReturn_t res = nvmlDeviceGetComputeRunningProcesses_v2(device,&infcount,infos);
       if (res == NVML_ERROR_INSUFFICIENT_SIZE) {
         LOG_WARN("get_used_gpu_utilization: Device %d - Buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.", 
                  cudadev, infcount, SHARED_REGION_MAX_PROCESS_NUM);
@@ -190,16 +177,15 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
         LOG_WARN("get_used_gpu_utilization: Device %d - nvmlDeviceGetComputeRunningProcesses failed with error %d", cudadev, res);
       }
       if (res == NVML_SUCCESS || res == NVML_ERROR_INSUFFICIENT_SIZE) {
-        for (i=0; i<infcount; i++){
-          // CRITICAL: Use safe PID extraction to handle struct mismatches
-          unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
-          if (actual_pid == 0) {
+        unsigned int bounded_infcount = infcount > SHARED_REGION_MAX_PROCESS_NUM ?
+                                        SHARED_REGION_MAX_PROCESS_NUM : infcount;
+        for (i=0; i<bounded_infcount; i++){
+          if (infos[i].pid == 0) {
             continue;  // Skip if we can't get a valid PID
           }
-          proc = find_proc_by_hostpid(actual_pid);
+          proc = find_proc_by_hostpid(infos[i].pid);
           if (proc != NULL){
-              // Extract memory value safely - handles struct mismatches where PID is at wrong offset
-              proc->monitorused[cudadev] = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
+              proc->monitorused[cudadev] = infos[i].usedGpuMemory;
           }
         }
       }
@@ -216,7 +202,9 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
         LOG_WARN("get_used_gpu_utilization: Device %d - nvmlDeviceGetProcessUtilization failed with error %d", cudadev, res);
       }
       if (res == NVML_SUCCESS || res == NVML_ERROR_INSUFFICIENT_SIZE) {
-        for (i=0; i<processes_num; i++){
+        unsigned int bounded_processes_num = processes_num > SHARED_REGION_MAX_PROCESS_NUM ?
+                                             SHARED_REGION_MAX_PROCESS_NUM : processes_num;
+        for (i=0; i<bounded_processes_num; i++){
           proc = find_proc_by_hostpid(processes_sample[i].pid);
           if (proc != NULL){
               sum += processes_sample[i].smUtil;
@@ -224,8 +212,6 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
           }
         }
       }
-      if (sum < 0)
-        sum = 0;
       userutil[cudadev] = sum;
     }
     unlock_shrreg();
@@ -235,7 +221,6 @@ int get_used_gpu_utilization(int *userutil,int *sysprocnum) {
 void* utilization_watcher() {
     nvmlInit();
     int userutil[CUDA_DEVICE_MAX_COUNT];
-    int sysprocnum;
     long share = 0;
     // Note: Only monitors device 0 - this is intentional since fractional GPU jobs
     // (the ones that need SM limiting) only get a single GPU slice. Full GPU jobs
@@ -256,8 +241,7 @@ void* utilization_watcher() {
             continue;
         }
         init_gpu_device_utilization();
-        get_used_gpu_utilization(userutil,&sysprocnum);
-        //if (sysprocnum == 1 &&
+        get_used_gpu_utilization(userutil);
         //    userutil < upper_limit / 10) {
         //    g_cur_cuda_cores =
         //        delta(upper_limit, userutil, share);
@@ -356,9 +340,9 @@ void* utilization_watcher() {
                                          (unsigned long long)limit, limit / (1024.0 * 1024.0 * 1024.0));
                             }
                             
-                            char cmd[1024];
-                            snprintf(cmd, sizeof(cmd), "logger -t softmig '%s'", syslog_msg);
-                            (void)system(cmd);  // Ignore return value - logging failure is non-critical
+                            openlog("softmig", LOG_PID, LOG_DAEMON);
+                            syslog(LOG_ERR, "%s", syslog_msg);
+                            closelog();
                             LOG_ERROR("OOM syslog: %s", syslog_msg);
                             
                             // Trigger gradual OOM killer

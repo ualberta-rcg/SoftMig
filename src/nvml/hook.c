@@ -1,3 +1,12 @@
+/**
+ * @file hook.c (nvml)
+ * @brief NVML library loading, dispatch table, and memory info hook.
+ *
+ * Populates the nvml_library_entry[] dispatch table by dlopen-ing
+ * libnvidia-ml.so.1 and resolving every hooked symbol. Provides the
+ * nvmlDeviceGetMemoryInfo hook that replaces total/used/free with
+ * SoftMig's per-job limits and NVML-summed usage (cgroup/UID filtered).
+ */
 #include <string.h>
 #include <ctype.h>
 #include <stdlib.h>
@@ -14,6 +23,8 @@
 #include "include/nvml_override.h"
 #include "include/utils.h"
 #include "include/process_utils.h"
+#include "include/dlsym_resolve.h"
+#include "include/nvml_cache.h"
 // Note: multiprocess_memory_limit.h includes <nvml.h> in its .c file, not the .h file
 // So including the header here should be safe
 #include "multiprocess/multiprocess_memory_limit.h"
@@ -271,7 +282,6 @@ pthread_once_t init_virtual_map_post_flag = PTHREAD_ONCE_INIT;
 
 typedef void* (*fp_dlsym)(void*, const char*);
 extern fp_dlsym real_dlsym;
-extern int virtual_nvml_devices;
 extern int cuda_to_nvml_map_array[CUDA_DEVICE_MAX_COUNT];
 
 nvmlReturn_t nvmlDeviceGetIndex(nvmlDevice_t device, unsigned int *index) {
@@ -279,52 +289,16 @@ nvmlReturn_t nvmlDeviceGetIndex(nvmlDevice_t device, unsigned int *index) {
 }
 
 
-// _dl_sym is an internal glibc function, use weak linking if available
-#ifdef __GLIBC__
-extern void* _dl_sym(void*, const char*, void*) __attribute__((weak));
-#endif
-
+/** Resolve all NVML symbols from libnvidia-ml.so.1 into nvml_library_entry[]. */
 void load_nvml_libraries() {
     void *table = NULL;
     char driver_filename[FILENAME_MAX];
 
     if (real_dlsym == NULL) {
-        // Try multiple methods to get the real dlsym, more robust for CVMFS/Compute Canada
-        real_dlsym = dlvsym(RTLD_NEXT,"dlsym","GLIBC_2.2.5");
+        real_dlsym = resolve_real_dlsym();
         if (real_dlsym == NULL) {
-            real_dlsym = dlvsym(RTLD_NEXT,"dlsym","");
-        }
-        if (real_dlsym == NULL) {
-            const char *glibc_versions[] = {"GLIBC_2.34", "GLIBC_2.17", "GLIBC_2.4", NULL};
-            for (int i = 0; glibc_versions[i] != NULL && real_dlsym == NULL; i++) {
-                real_dlsym = dlvsym(RTLD_NEXT, "dlsym", glibc_versions[i]);
-            }
-        }
-        if (real_dlsym == NULL) {
-            // Try getting dlsym from libdl.so.2 directly
-            void *libdl = dlopen("libdl.so.2", RTLD_LAZY | RTLD_LOCAL);
-            if (libdl != NULL) {
-                typedef void* (*dlsym_fn)(void*, const char*);
-                dlsym_fn libdl_dlsym = (dlsym_fn)dlvsym(libdl, "dlsym", "");
-                if (libdl_dlsym == NULL) {
-                    libdl_dlsym = (dlsym_fn)dlvsym(libdl, "dlsym", "GLIBC_2.2.5");
-                }
-                if (libdl_dlsym != NULL) {
-                    real_dlsym = (fp_dlsym)libdl_dlsym(RTLD_DEFAULT, "dlsym");
-                }
-            }
-        }
-        if (real_dlsym == NULL) {
-            #ifdef __GLIBC__
-            extern void* _dl_sym(void*, const char*, void*) __attribute__((weak));
-            if (_dl_sym != NULL) {
-                real_dlsym = (fp_dlsym)_dl_sym(RTLD_NEXT, "dlsym", (void*)dlsym);
-            }
-            #endif
-            if (real_dlsym == NULL) {
-                LOG_ERROR("real dlsym not found - all methods failed");
-                return;  // CRITICAL: Return early if we can't get real_dlsym to avoid segfault
-            }
+            LOG_ERROR("real dlsym not found - all methods failed");
+            return;
         }
     }
     snprintf(driver_filename, FILENAME_MAX - 1, "%s", "libnvidia-ml.so.1");
@@ -361,56 +335,33 @@ void nvml_postInit() {
     init_device_info();
 }
 
-// Helper function to initialize nvmlProcessInfo_t structs with proper version
-// This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-static inline void init_nvml_process_info_structs(nvmlProcessInfo_t *infos, unsigned int count, unsigned int version) {
-    for (unsigned int i = 0; i < count; i++) {
-        infos[i].version = version;
-    }
-}
-
-// Sum memory usage directly from NVML by querying running processes
-// This is more accurate than tracking allocations ourselves
-// Made non-static so it can be used for enforcement checks too
+/**
+ * Sum GPU memory used by processes belonging to the current cgroup/UID on a device.
+ *
+ * Bypasses the hook to get ALL processes, then filters by cgroup session or UID.
+ * Applies a 9 MB minimum and 5% overhead per process. Returns 0 if the NVML
+ * query fails (caller should fall back to tracked usage).
+ */
 uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
-    unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
-    // Use nvmlProcessInfo_t from nvml-subset.h (standard type)
     nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
-    
-    // CRITICAL: Initialize version field for all structs before calling NVML
-    // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-    init_nvml_process_info_structs(infos, SHARED_REGION_MAX_PROCESS_NUM, nvmlProcessInfo_v2);
-    
-    // Get the real NVML function (bypass our hook to avoid recursion)
-    // Note: nvmlDeviceGetComputeRunningProcesses is mapped to _v2 via prefix header
-    nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, 
-                                                   nvmlDeviceGetComputeRunningProcesses, 
-                                                   device, &process_count, infos);
-    
-    
-    if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
-        // If we can't get process info, fall back to tracked usage
-        LOG_WARN("nvmlDeviceGetComputeRunningProcesses failed: %d (%s), falling back to tracked usage", 
-                 ret, (ret == NVML_ERROR_UNINITIALIZED ? "UNINITIALIZED" : 
-                       ret == NVML_ERROR_INVALID_ARGUMENT ? "INVALID_ARGUMENT" : "OTHER"));
-        return 0;  // Return 0 to trigger fallback
-    }
+
+    unsigned int process_count = nvml_cached_get_compute_processes(
+        device, SHARED_REGION_MAX_PROCESS_NUM, infos);
     
     uint64_t total_usage = 0;
-    const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;  // 9 MB minimum per process
-    const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
-    const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;  // NVML constant for unavailable values
+    const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;
+    const double PROCESS_OVERHEAD_PERCENT = 0.05;
+    const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;
     
-    // Get current user's UID for fallback filtering
     uid_t current_uid = getuid();
     
+    unsigned int bounded_count = process_count;
     unsigned int included_count = 0;
     unsigned int skipped_count = 0;
     
     // Sum up memory from all processes belonging to current cgroup session (or current user if not in cgroup)
-    for (unsigned int i = 0; i < process_count; i++) {
-        // CRITICAL: Use safe PID extraction to handle struct mismatches
-        unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
+    for (unsigned int i = 0; i < bounded_count; i++) {
+        unsigned int actual_pid = infos[i].pid;
         if (actual_pid == 0) {
             skipped_count++;
             continue;  // Skip if we can't get a valid PID
@@ -440,21 +391,8 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
         
         included_count++;
         
-        // Extract memory value safely - handles struct mismatches where PID is at wrong offset
-        uint64_t process_mem = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
+        uint64_t process_mem = infos[i].usedGpuMemory;
         
-        // Validate that extracted memory is reasonable (not the PID value)
-        // If process_mem equals the PID, it's likely wrong (we read PID instead of memory)
-        if (process_mem > 0 && (process_mem == (uint64_t)actual_pid || process_mem == (uint64_t)infos[i].pid)) {
-            // We extracted the PID instead of memory - try using header value if reasonable
-            if (infos[i].usedGpuMemory > 1048576 && infos[i].usedGpuMemory < 107374182400ULL) {
-                process_mem = infos[i].usedGpuMemory;
-            } else {
-                process_mem = 0;  // Will trigger MIN_PROCESS_MEMORY fallback
-            }
-        }
-        
-        // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
         if (process_mem != NVML_VALUE_NOT_AVAILABLE_ULL && process_mem > 0) {
             // Add 5% overhead, then ensure minimum
             uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
@@ -469,6 +407,12 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     return total_usage;
 }
 
+/**
+ * Hooked nvmlDeviceGetMemoryInfo — reports per-job limits and cgroup-filtered usage.
+ *
+ * Calls the real NVML to get hardware values, then replaces total/used/free
+ * with the SoftMig memory limit and summed per-job usage.
+ */
 nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int version) {
     // Reduced logging - nvmlDeviceGetMemoryInfo is called very frequently (e.g., by nvidia-smi)
     if (memory == NULL) {

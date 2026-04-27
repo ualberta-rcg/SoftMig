@@ -1,3 +1,11 @@
+/**
+ * @file allocator.h
+ * @brief GPU memory allocation tracker with OOM enforcement.
+ *
+ * Maintains a doubly-linked list of allocated GPU memory chunks and provides
+ * OOM checks against the per-device memory limit before every allocation.
+ * Works with both synchronous (cuMemAlloc) and async (cuMemAllocAsync) paths.
+ */
 #include <stdio.h>
 #include <cuda.h>
 #include <assert.h>
@@ -6,9 +14,6 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <errno.h>
-
-#define CUMALLOC 0
-#define CUCREATE 1
 
 struct allocated_device_memory_struct{
     CUdeviceptr address;
@@ -32,31 +37,6 @@ struct allocated_list_struct{
 };
 typedef struct allocated_list_struct allocated_list;
 
-struct region_struct{
-    size_t start;
-    size_t freemark;
-    size_t freed_map;
-    size_t length;
-    CUcontext ctx;
-    allocated_list *region_allocs;
-    char *bitmap;
-    CUmemGenericAllocationHandle *allocHandle;
-};
-typedef struct region_struct region;
-
-struct region_list_entry_struct{
-    region *entry;
-    struct region_list_entry_struct *next,*prev;
-};
-typedef struct region_list_entry_struct region_list_entry;
-
-struct region_list_struct{
-    region_list_entry   *head;
-    region_list_entry   *tail;
-    size_t length;
-};
-typedef struct region_list_struct region_list;
-
 extern allocated_list *device_overallocated;
 extern allocated_list *device_allocasync;
 extern pthread_mutex_t mutex;
@@ -67,8 +47,6 @@ extern pthread_mutex_t mutex;
     list->length=0;          \
     list->limit=0;           \
     }
-#define __LIST_INIT(list) LIST_INIT(list)
-
 #define QUIT_WITH_ERROR(__message) {    \
     LOG_ERROR("%s\n",#__message);  \
     return -1;                          \
@@ -120,17 +98,31 @@ extern pthread_mutex_t mutex;
 
 
 
-// Checks if oom
+/**
+ * Check if allocating addon bytes on dev would exceed the memory limit.
+ * Uses summed NVML usage with cgroup/UID filtering. Triggers OOM killer if over limit.
+ * @return 0 if allocation is allowed, 1 if OOM.
+ */
 int oom_check(const int dev,size_t addon);
 
-// Allocate and free device memory
+/** Allocate GPU memory with OOM check; thread-safe. Returns CUDA error code. */
 int allocate_raw(CUdeviceptr *dptr, size_t size);
+
+/** Free GPU memory and update tracking; thread-safe. */
 int free_raw(CUdeviceptr dptr);
+
+/** Track an externally-allocated chunk (e.g., cuMemAllocManaged) with OOM check. */
 int add_chunk_only(CUdeviceptr address,size_t size);
+
+/** Remove tracking for an externally-freed chunk. */
 int remove_chunk_only(CUdeviceptr address);
+
+/** Async allocation with OOM check via memory pool. */
 int allocate_async_raw(CUdeviceptr *dptr, size_t size, CUstream hStream);
+
+/** Async free via memory pool. */
 int free_raw_async(CUdeviceptr dptr, CUstream hStream);
 
-// Checks memory type
+/** Check whether an address belongs to a device allocation or host memory. */
 int check_memory_type(CUdeviceptr address);
 

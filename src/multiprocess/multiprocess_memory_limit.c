@@ -1,3 +1,13 @@
+/**
+ * @file multiprocess_memory_limit.c
+ * @brief Shared memory region management, OOM killer, and per-device limit enforcement.
+ *
+ * Creates and maps an mmap-backed shared region (per SLURM job) that tracks
+ * per-process GPU memory usage, SM utilization, and device limits. Provides
+ * the semaphore-protected lock_shrreg/unlock_shrreg API, the active and
+ * gradual OOM killers (cgroup/UID-aware), and NVML-based memory summation
+ * with 9 MB minimum + 5 % overhead per process.
+ */
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -33,6 +43,9 @@
 // Use weak symbol so it's NULL if nvml_mod not linked, allowing fallback
 extern entry_t nvml_library_entry[] __attribute__((weak));
 
+// Shared NVML memory summation (defined in nvml/hook.c, weak for shrreg-tool)
+extern uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) __attribute__((weak));
+
 // Forward declarations for NVML functions (provided by hooks)
 const char *nvmlErrorString(nvmlReturn_t result);
 nvmlReturn_t nvmlDeviceGetCount_v2(unsigned int *deviceCount);
@@ -42,7 +55,7 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device, unsigned 
 
 
 #ifndef SEM_WAIT_TIME
-#define SEM_WAIT_TIME 10
+#define SEM_WAIT_TIME 3
 #endif
 
 #ifndef SEM_WAIT_TIME_ON_EXIT
@@ -50,12 +63,12 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device, unsigned 
 #endif
 
 #ifndef SEM_WAIT_RETRY_TIMES
-#define SEM_WAIT_RETRY_TIMES 30
+#define SEM_WAIT_RETRY_TIMES 5
 #endif
 
 int pidfound;
 
-int ctx_activate[32];
+int ctx_activate[CTX_ACTIVATE_SIZE];
 
 static shared_region_info_t region_info = {0, -1, PTHREAD_ONCE_INIT, NULL, 0};
 //size_t initial_offset=117440512;
@@ -138,26 +151,29 @@ int init_device_info() {
 
 
 int load_env_from_file(char *filename) {
+    if (getenv("SLURM_JOB_ID") != NULL) {
+        // In SLURM jobs, limits must come from /var/run/softmig/*.conf.
+        // Ignore legacy env-file injection paths.
+        return 0;
+    }
     FILE *f=fopen(filename,"r");
     if (f==NULL)
         return 0;
     char tmp[10000];
-    int cursor=0;
-    while (!feof(f)){
-        if (fgets(tmp,10000,f) == NULL)
-            break;
-        if (strstr(tmp,"=")==NULL)
-            break;
-        if (tmp[strlen(tmp)-1]=='\n')
-            tmp[strlen(tmp)-1]='\0';
-        for (cursor=0;cursor<strlen(tmp);cursor++){
-            if (tmp[cursor]=='=') {
-                tmp[cursor]='\0';
-                setenv(tmp,tmp+cursor+1,1);
-                break;
+    while (fgets(tmp, sizeof(tmp), f) != NULL) {
+        if (strstr(tmp,"==")==NULL && strstr(tmp,"=")!=NULL) {
+            size_t len = strlen(tmp);
+            if (len > 0 && tmp[len-1]=='\n') tmp[len-1]='\0';
+            for (int cursor=0; tmp[cursor]!='\0'; cursor++) {
+                if (tmp[cursor]=='=') {
+                    tmp[cursor]='\0';
+                    setenv(tmp, tmp+cursor+1, 1);
+                    break;
+                }
             }
         }
     }
+    fclose(f);
     return 0;
 }
 
@@ -278,12 +294,6 @@ int active_oom_killer() {
         unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
         nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
         
-        // CRITICAL: Initialize version field for all structs before calling NVML
-        // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-        for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
-            infos[j].version = nvmlProcessInfo_v2;
-        }
-        
         if (nvml_library_entry != NULL) {
             // Bypass hook to get ALL processes directly from NVML
             ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
@@ -297,10 +307,6 @@ int active_oom_killer() {
         if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
             LOG_WARN("active_oom_killer: Buffer too small, retrying with larger buffer");
             process_count = SHARED_REGION_MAX_PROCESS_NUM;
-            // Re-initialize version fields before retry
-            for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
-                infos[j].version = nvmlProcessInfo_v2;
-            }
             if (nvml_library_entry != NULL) {
                 ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
                                                 device, &process_count, infos);
@@ -315,14 +321,15 @@ int active_oom_killer() {
             continue;
         }
         
-        LOG_DEBUG("active_oom_killer: Device %u has %u processes (unfiltered)", dev_idx, process_count);
+        unsigned int bounded_count = process_count > SHARED_REGION_MAX_PROCESS_NUM ?
+                                     SHARED_REGION_MAX_PROCESS_NUM : process_count;
+        LOG_DEBUG("active_oom_killer: Device %u has %u processes (bounded to %u)", dev_idx, process_count, bounded_count);
         
         // Filter and kill processes belonging to current cgroup/UID
         // Only non-root users get this treatment (root is disabled above)
         // In multi-user SLURM environment: filter by cgroup first (job isolation), then UID (user isolation)
-        for (unsigned int i = 0; i < process_count; i++) {
-            // CRITICAL: Use safe PID extraction to handle struct mismatches
-            unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
+        for (unsigned int i = 0; i < bounded_count; i++) {
+            unsigned int actual_pid = infos[i].pid;
             if (actual_pid == 0) {
                 LOG_WARN("active_oom_killer: Process[%u] - could not extract valid PID, skipping", i);
                 continue;  // Skip if we can't get a valid PID
@@ -357,8 +364,7 @@ int active_oom_killer() {
                 // Verify process is still alive before killing
                 int proc_state = proc_alive(actual_pid);
                 if (proc_state == PROC_STATE_ALIVE) {
-                    // Extract memory value safely - handles struct mismatches where PID is at wrong offset
-                    uint64_t process_mem = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
+                    uint64_t process_mem = infos[i].usedGpuMemory;
                     LOG_ERROR("active_oom_killer: KILLING PID %u (device %u, memory %llu bytes)", 
                              actual_pid, dev_idx, (unsigned long long)process_mem);
                     int kill_result = kill(actual_pid, SIGKILL);
@@ -394,15 +400,13 @@ typedef struct {
     uint64_t memory;
 } process_memory_info_t;
 
-// Comparison function for qsort - sort by PID descending (highest/newest first)
-// Higher PID typically means newer process, so we kill newest processes first
+/** Sort OOM victims by memory usage descending (largest consumer first). */
 static int compare_process_memory(const void* a, const void* b) {
     const process_memory_info_t* pa = (const process_memory_info_t*)a;
     const process_memory_info_t* pb = (const process_memory_info_t*)b;
     
-    // Sort by PID descending (highest/newest PID first)
-    if (pa->pid > pb->pid) return -1;
-    if (pa->pid < pb->pid) return 1;
+    if (pa->memory > pb->memory) return -1;
+    if (pa->memory < pb->memory) return 1;
     return 0;
 }
 
@@ -560,12 +564,6 @@ int gradual_oom_killer(int cuda_dev) {
     unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
     nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
     
-    // CRITICAL: Initialize version field for all structs before calling NVML
-    // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-    for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
-        infos[j].version = nvmlProcessInfo_v2;
-    }
-    
     if (nvml_library_entry != NULL) {
         ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
                                         device, &process_count, infos);
@@ -579,29 +577,17 @@ int gradual_oom_killer(int cuda_dev) {
         return -1;
     }
     
-    // #region Detailed NVML struct logging - helps debug struct mismatches
-    LOG_DEBUG("RAW_NVML_BYPASS: Received %u processes from NVML (gradual_oom_killer), struct_size=%zu bytes", 
-              process_count, sizeof(nvmlProcessInfo_t));
-    for (unsigned int i = 0; i < process_count && i < 10; i++) {
-        unsigned int safe_pid = extract_pid_safely((void *)&infos[i]);
-        LOG_DEBUG("RAW_NVML_BYPASS Process[%u]: version=%u header_pid=%u safe_pid=%u memory=%llu struct_size=%zu", 
-                  i, infos[i].version, infos[i].pid, safe_pid,
-                  (unsigned long long)infos[i].usedGpuMemory,
-                  sizeof(nvmlProcessInfo_t));
-        if (safe_pid != infos[i].pid && safe_pid != 0) {
-            LOG_WARN("RAW_NVML_BYPASS Process[%u]: STRUCT MISMATCH - header_pid=%u, safe_pid=%u", 
-                     i, infos[i].pid, safe_pid);
-        }
-    }
-    // #endregion
+    unsigned int bounded_count = process_count > SHARED_REGION_MAX_PROCESS_NUM ?
+                                 SHARED_REGION_MAX_PROCESS_NUM : process_count;
+    LOG_DEBUG("gradual_oom_killer: Received %u processes from NVML, bounded=%u", 
+              process_count, bounded_count);
     
     // Filter processes belonging to current cgroup/UID and collect them
     process_memory_info_t filtered_processes[SHARED_REGION_MAX_PROCESS_NUM];
     unsigned int filtered_count = 0;
     
-    for (unsigned int i = 0; i < process_count; i++) {
-        // CRITICAL: Use safe PID extraction to handle struct mismatches
-        unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
+    for (unsigned int i = 0; i < bounded_count; i++) {
+        unsigned int actual_pid = infos[i].pid;
         if (actual_pid == 0) {
             continue;  // Skip if we can't get a valid PID
         }
@@ -623,8 +609,7 @@ int gradual_oom_killer(int cuda_dev) {
         
         if (should_kill && proc_alive(actual_pid) == PROC_STATE_ALIVE) {
             filtered_processes[filtered_count].pid = actual_pid;
-            // Extract memory value safely - handles struct mismatches where PID is at wrong offset
-            filtered_processes[filtered_count].memory = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
+            filtered_processes[filtered_count].memory = infos[i].usedGpuMemory;
             filtered_count++;
         }
     }
@@ -637,13 +622,18 @@ int gradual_oom_killer(int cuda_dev) {
     // Sort processes by PID (highest/newest first) - kill newest processes first
     qsort(filtered_processes, filtered_count, sizeof(process_memory_info_t), compare_process_memory);
     
-    LOG_ERROR("gradual_oom_killer: Found %u processes on device %d, sorted by PID (newest/highest PID first)", 
+    LOG_ERROR("gradual_oom_killer: Found %u processes on device %d, sorted by memory usage (largest first)", 
               filtered_count, cuda_dev);
     
     uint64_t limit = get_current_device_memory_limit(cuda_dev);
     int killed = 0;
     time_t start_time = time(NULL);
-    const int MAX_OOM_DURATION = 30;  // Kill cgroup if over limit for 30 seconds
+    int MAX_OOM_DURATION = 30;
+    char* oom_timeout_str = getenv("SOFTMIG_OOM_TIMEOUT");
+    if (oom_timeout_str != NULL) {
+        int val = atoi(oom_timeout_str);
+        if (val > 0 && val <= 300) MAX_OOM_DURATION = val;
+    }
     
     // Kill processes one by one until under limit or only one remains
     for (unsigned int i = 0; i < filtered_count; i++) {
@@ -813,165 +803,24 @@ int init_gpu_device_utilization(){
         for (dev=0;dev<CUDA_DEVICE_MAX_COUNT;dev++){
             region_info.shared_region->procs[i].device_util[dev].sm_util = 0;
             region_info.shared_region->procs[i].monitorused[dev] = 0;
-            break;
         }
     }
     unlock_shrreg();
     return 1;
 }
 
-// Get summed memory usage from NVML for a CUDA device index
-// This uses the same calculation as nvmlDeviceGetMemoryInfo (9MB min + 5% overhead + UID filtering)
-// Always uses the summed calculation - no fallback to tracked usage
 uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev) {
+    if (sum_process_memory_from_nvml == NULL) return 0;
     unsigned int nvml_dev_idx = cuda_to_nvml_map(cuda_dev);
     nvmlDevice_t ndev;
     nvmlReturn_t ret = nvmlDeviceGetHandleByIndex(nvml_dev_idx, &ndev);
     if (ret != NVML_SUCCESS) {
-        LOG_WARN("get_summed_device_memory_usage_from_nvml: NVML get device %d (CUDA %d) error, %s", 
+        LOG_WARN("get_summed_device_memory_usage_from_nvml: NVML get device %d (CUDA %d) error, %s",
                  nvml_dev_idx, cuda_dev, nvmlErrorString(ret));
         return 0;
     }
-    
-    unsigned int process_count = SHARED_REGION_MAX_PROCESS_NUM;
-    nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
-    
-    // CRITICAL: Initialize version field for all structs before calling NVML
-    // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-    for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
-        infos[j].version = nvmlProcessInfo_v2;
-    }
-    
-    // Bypass hook to get ALL processes directly from NVML, then filter ourselves
-    // This ensures we see all processes, not just the ones the hook filtered
-    // The hook filters processes, but we need to see all processes to calculate accurate memory usage
-    if (nvml_library_entry != NULL) {
-        ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2,
-                                        ndev, &process_count, infos);
-    } else {
-        // Fallback if nvml_library_entry not available (shouldn't happen in normal operation)
-        ret = nvmlDeviceGetComputeRunningProcesses(ndev, &process_count, infos);
-    }
-    
-    if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
-        LOG_WARN("get_summed_device_memory_usage_from_nvml: nvmlDeviceGetComputeRunningProcesses failed: %d (%s)", 
-                 ret, nvmlErrorString(ret));
-        return 0;
-    }
-    
-    uint64_t total_usage = 0;
-    const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;  // 9 MB minimum per process
-    const double PROCESS_OVERHEAD_PERCENT = 0.05;  // 5% overhead
-    const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;
-    
-    // Get current user's UID for fallback filtering
-    uid_t current_uid = getuid();
-    
-    // Sum up memory from all processes belonging to current SLURM job (or current user if not in SLURM)
-    unsigned int included_count = 0;
-    unsigned int skipped_count = 0;
-    unsigned int pid_extract_failed = 0;
-    
-    LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Starting - process_count=%u current_uid=%u current_pid=%d", 
-                   process_count, current_uid, getpid());
-    
-    for (unsigned int i = 0; i < process_count; i++) {
-        // CRITICAL: Use safe PID extraction to handle struct mismatches
-        unsigned int actual_pid = extract_pid_safely((void *)&infos[i]);
-        if (actual_pid == 0) {
-            pid_extract_failed++;
-            LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] - could not extract PID (header pid=%u), skipping", 
-                         i, infos[i].pid);
-            continue;  // Skip if we can't get a valid PID
-        }
-        
-        // First try to check if process belongs to current cgroup session
-        int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
-        
-        LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - cgroup_check=%d memory=%llu", 
-                     i, actual_pid, cgroup_check, (unsigned long long)infos[i].usedGpuMemory);
-        
-        if (cgroup_check == -1) {
-            // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
-            uid_t proc_uid = proc_get_uid(actual_pid);
-            
-            if (proc_uid == (uid_t)-1) {
-                // Couldn't read UID - skip this process to avoid blocking on shared region lock
-                LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - could not read UID, skipping", 
-                         i, actual_pid);
-                skipped_count++;
-                continue;
-            } else if (proc_uid != current_uid) {
-                LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - UID %u != current UID %u, skipping", 
-                             i, actual_pid, proc_uid, current_uid);
-                skipped_count++;
-                continue;
-            }
-        } else if (cgroup_check == 0) {
-            // Process is in a different cgroup session - skip it
-            LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - different cgroup (check=%d), skipping", 
-                         i, actual_pid, cgroup_check);
-            skipped_count++;
-            continue;
-        }
-        // cgroup_check == 1 means process belongs to current cgroup session - include it
-        
-        // Extract memory value safely - handles struct mismatches where PID is at wrong offset
-        uint64_t process_mem = extract_memory_safely((void *)&infos[i], actual_pid, infos[i].pid);
-        
-        // Log what we extracted vs what header says (for debugging)
-        LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - extracted_memory=%llu header_memory=%llu", 
-                     i, actual_pid, (unsigned long long)process_mem, (unsigned long long)infos[i].usedGpuMemory);
-        
-        // Skip if memory value is not available (NVML_VALUE_NOT_AVAILABLE) or invalid
-        if (process_mem != NVML_VALUE_NOT_AVAILABLE_ULL && process_mem > 0) {
-            // Validate that extracted memory is reasonable (not the PID value)
-            // If process_mem equals the PID, it's likely wrong (we read PID instead of memory)
-            if (process_mem == (uint64_t)actual_pid || process_mem == (uint64_t)infos[i].pid) {
-                // We extracted the PID instead of memory - this is wrong
-                LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - extracted memory equals PID (%llu), using header value %llu instead", 
-                         i, actual_pid, (unsigned long long)process_mem, (unsigned long long)infos[i].usedGpuMemory);
-                // Try using header value if it's reasonable
-                if (infos[i].usedGpuMemory > 1048576 && infos[i].usedGpuMemory < 107374182400ULL) {
-                    process_mem = infos[i].usedGpuMemory;
-                } else {
-                    // Header value also looks wrong - use minimum
-                    process_mem = 0;  // Will trigger MIN_PROCESS_MEMORY fallback
-                }
-            }
-            
-            if (process_mem > 0) {
-                // Add 5% overhead, then ensure minimum
-                uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
-                uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
-                total_usage += process_mem_counted;
-                included_count++;
-                LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - INCLUDED: memory=%llu bytes (%.2f GB), total_usage now=%llu bytes (%.2f GB)", 
-                             i, actual_pid, (unsigned long long)process_mem, 
-                             process_mem / (1024.0 * 1024.0 * 1024.0),
-                             (unsigned long long)total_usage,
-                             total_usage / (1024.0 * 1024.0 * 1024.0));
-            } else {
-                // Extracted value was invalid (was PID) - use minimum
-                total_usage += MIN_PROCESS_MEMORY;
-                included_count++;
-                LOG_WARN("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - extracted memory invalid, using minimum (9MB). Header value was %llu", 
-                         i, actual_pid, (unsigned long long)infos[i].usedGpuMemory);
-            }
-        } else {
-            // Even if NVML reports 0 or unavailable, count minimum for the process
-            total_usage += MIN_PROCESS_MEMORY;
-            included_count++;
-            LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Process[%u] PID %u - INCLUDED (min memory): memory=%llu (invalid/unavailable), total_usage now=%llu bytes", 
-                         i, actual_pid, (unsigned long long)infos[i].usedGpuMemory, (unsigned long long)total_usage);
-        }
-    }
-    
-    LOG_FILE_DEBUG("get_summed_device_memory_usage_from_nvml: Final - included=%u skipped=%u pid_extract_failed=%u total_usage=%llu bytes (%.2f GB)", 
-                  included_count, skipped_count, pid_extract_failed, (unsigned long long)total_usage, 
-                  total_usage / (1024.0 * 1024.0 * 1024.0));
-    
-    return total_usage;
+
+    return sum_process_memory_from_nvml(ndev);
 }
 
 
@@ -985,6 +834,9 @@ int add_gpu_device_memory_usage(int32_t pid,int cudadev,size_t usage,int type){
     int i;
     for (i=0;i<region_info.shared_region->proc_num;i++){
         if (region_info.shared_region->procs[i].pid == pid){
+            if (region_info.shared_region->procs[i].hostpid == 0) {
+                region_info.shared_region->procs[i].hostpid = pid;
+            }
             region_info.shared_region->procs[i].used[dev].total+=usage;
             switch (type) {
                 case 0:{
@@ -1071,6 +923,12 @@ int fix_lock_shrreg() {
         }
         if (flag == 1) {
             region->owner_pid = region_info.pid;
+            if (sem_destroy(&region->sem) != 0) {
+                LOG_WARN("fix_lock_shrreg: sem_destroy failed: errno=%d", errno);
+            }
+            if (sem_init(&region->sem, 1, 0) != 0) {
+                LOG_ERROR("fix_lock_shrreg: sem_init failed: errno=%d", errno);
+            }
             SEQ_POINT_MARK(SEQ_FIX_SHRREG_UPDATE_OWNER_OK);
             res = 0;     
         }
@@ -1137,49 +995,38 @@ void exit_handler() {
 
 void lock_shrreg() {
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
-        return;  // No-op when softmig is disabled
+        return;
     }
-    struct timespec sem_ts;
-    get_timespec(SEM_WAIT_TIME, &sem_ts);
     shared_region_t* region = region_info.shared_region;
     int trials = 0;
     while (1) {
+        struct timespec sem_ts;
+        get_timespec(SEM_WAIT_TIME, &sem_ts);
         int status = sem_timedwait(&region->sem, &sem_ts);
         SEQ_POINT_MARK(SEQ_ACQUIRE_SEMLOCK_OK);
 
         if (status == 0) {
-            // TODO: irregular exit here will hang pending locks
             region->owner_pid = region_info.pid;
             __sync_synchronize();
             SEQ_POINT_MARK(SEQ_UPDATE_OWNER_OK);
-            trials = 0;
             break;
         } else if (errno == ETIMEDOUT) {
-            LOG_WARN("Lock shrreg timeout, try fix (%d:%ld)", region_info.pid,region->owner_pid);
+            trials++;
             int32_t current_owner = region->owner_pid;
             if (current_owner != 0 && (current_owner == region_info.pid ||
                     proc_alive(current_owner) == PROC_STATE_NONALIVE)) {
-                LOG_WARN("Owner proc dead (%d), try fix", current_owner);
-                if (0 == fix_lock_shrreg()) {
-                    break;
-                }
-            } else {
-                trials++;
-                if (trials > SEM_WAIT_RETRY_TIMES) {
-                    LOG_WARN("Fail to lock shrreg in %d seconds",
-                        SEM_WAIT_RETRY_TIMES * SEM_WAIT_TIME);
-                    if (current_owner == 0) {
-                        LOG_WARN("fix current_owner 0>%d",region_info.pid);
-                        region->owner_pid = region_info.pid;
-                        if (0 == fix_lock_shrreg()) {
-                            break;
-                        } 
-                    }
-                }
-                continue;  // slow wait path
+                LOG_WARN("Owner proc dead or self (%d), fixing lock", current_owner);
+                if (0 == fix_lock_shrreg()) break;
+            }
+            if (trials > SEM_WAIT_RETRY_TIMES) {
+                LOG_WARN("Lock shrreg timeout after %ds, forcing recovery (owner=%ld)",
+                    trials * SEM_WAIT_TIME, (long)current_owner);
+                region->owner_pid = region_info.pid;
+                if (0 == fix_lock_shrreg()) break;
+                trials = 0;
             }
         } else {
-            LOG_ERROR("Failed to lock shrreg: %d", errno);
+            LOG_ERROR("Failed to lock shrreg: errno=%d", errno);
         }
     }
 }
@@ -1259,26 +1106,9 @@ void init_proc_slot_withlock() {
     unlock_shrreg();
 }
 
-void print_all() {
-    if (!is_softmig_enabled() || region_info.shared_region == NULL) {
-        LOG_INFO("softmig is disabled - no process information available");
-        return;
-    }
-}
-
 void child_reinit_flag() {
     LOG_DEBUG("Detect child pid: %d -> %d", region_info.pid, getpid());   
     region_info.init_status = PTHREAD_ONCE_INIT;
-}
-
-int set_active_oom_killer() {
-    // Always enabled when softmig is active (no env var needed)
-    return 1;
-}
-
-int set_env_utilization_switch() {
-    // Always enabled when softmig is active (no env var needed)
-    return 1;
 }
 
 void try_create_shrreg() {
@@ -1291,8 +1121,8 @@ void try_create_shrreg() {
         }
     }
 
-    enable_active_oom_killer = set_active_oom_killer();
-    env_utilization_switch = set_env_utilization_switch();
+    enable_active_oom_killer = 1;
+    env_utilization_switch = 1;
     pthread_atfork(NULL, NULL, child_reinit_flag);
 
     region_info.pid = getpid();
@@ -1345,27 +1175,19 @@ void try_create_shrreg() {
     /* If you need sm modification, do it here */
     /* ... set_sm_scale */
 
-    int fd = open(shr_reg_file, O_RDWR | O_CREAT, 0666);
+    int fd = open(shr_reg_file, O_RDWR | O_CREAT, 0600);
     if (fd == -1) {
         LOG_ERROR("Fail to open shrreg %s: errno=%d", shr_reg_file, errno);
     }
     region_info.fd = fd;
-    size_t offset = lseek(fd, SHARED_REGION_SIZE_MAGIC, SEEK_SET);
-    if (offset != SHARED_REGION_SIZE_MAGIC) {
-        LOG_ERROR("Fail to init shrreg %s: errno=%d", shr_reg_file, errno);
-    }
-    size_t check_bytes = write(fd, "\0", 1);
-    if (check_bytes != 1) {
-        LOG_ERROR("Fail to write shrreg %s: errno=%d", shr_reg_file, errno);
-    }
-    if (lseek(fd, 0, SEEK_SET) != 0) {
-        LOG_ERROR("Fail to reseek shrreg %s: errno=%d", shr_reg_file, errno);
+    if (ftruncate(fd, SHARED_REGION_SIZE_MAGIC) != 0) {
+        LOG_ERROR("Fail to size shrreg %s: errno=%d", shr_reg_file, errno);
     }
     region_info.shared_region = (shared_region_t*) mmap(
         NULL, SHARED_REGION_SIZE_MAGIC, 
         PROT_WRITE | PROT_READ, MAP_SHARED, fd, 0);
     shared_region_t* region = region_info.shared_region;
-    if (region == NULL) {
+    if (region == MAP_FAILED) {
         LOG_ERROR("Fail to map shrreg %s: errno=%d", shr_reg_file, errno);
     }
     if (lockf(fd, F_LOCK, SHARED_REGION_SIZE_MAGIC) != 0) {
@@ -1651,6 +1473,16 @@ shrreg_proc_slot_t *find_proc_by_hostpid(int hostpid) {
     for (i=0;i<region_info.shared_region->proc_num;i++) {
         if (region_info.shared_region->procs[i].hostpid == hostpid) 
             return &region_info.shared_region->procs[i];
+        if (region_info.shared_region->procs[i].hostpid == 0 &&
+            region_info.shared_region->procs[i].pid == hostpid) {
+            // Lazy hostpid registration fallback:
+            // some processes can miss early set_task_pid timing, but their
+            // process pid is already known in the shared region slot.
+            region_info.shared_region->procs[i].hostpid = hostpid;
+            LOG_DEBUG("find_proc_by_hostpid: lazily set hostpid=%d for slot pid=%d",
+                      hostpid, region_info.shared_region->procs[i].pid);
+            return &region_info.shared_region->procs[i];
+        }
     }
     return NULL;
 }

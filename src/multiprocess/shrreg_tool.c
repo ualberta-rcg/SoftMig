@@ -27,7 +27,6 @@ void create_new() {
 
 void print_shared_region(){
     ensure_initialized();
-    print_all();
 }
 
 

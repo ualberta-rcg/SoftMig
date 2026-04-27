@@ -1,8 +1,19 @@
+/**
+ * @file utils.c
+ * @brief PID detection, process list merging, CUDA device mapping, and file-based locking.
+ *
+ * Implements set_task_pid (discovers the NVML host PID for the current process
+ * by creating a temporary CUDA context and diffing the process list),
+ * CUDA_VISIBLE_DEVICES parsing, and a SLURM-aware file lock used to
+ * serialize initialization across co-located processes.
+ */
 #include <stdio.h>
 #include <string.h>
 #include <dirent.h>
 #include <ctype.h>
 #include <time.h>
+#include <sys/file.h>
+#include <errno.h>
 #include "include/utils.h"
 #include "include/log_utils.h"
 #include "include/nvml_prefix.h"
@@ -11,11 +22,18 @@
 #include "include/libnvml_hook.h"  // This includes nvml-subset.h which has all needed types
 #include "include/nvml_override.h"
 #include "include/libcuda_hook.h"
+#include "include/process_utils.h"
 #include "multiprocess/multiprocess_memory_limit.h"
 
 // Note: fp1 is now defined in log_file.c to avoid linking issues with standalone tools
 // Access to nvml_library_entry to bypass filtering in set_task_pid
 extern entry_t nvml_library_entry[];
+
+// Forward declarations for NVML symbols used here.
+const char *nvmlErrorString(nvmlReturn_t result);
+nvmlReturn_t nvmlInit(void);
+nvmlReturn_t nvmlDeviceGetHandleByIndex(unsigned int index, nvmlDevice_t *device);
+nvmlReturn_t nvmlDeviceGetCount(unsigned int *deviceCount);
 
 // Helper to get lock file path (Compute Canada optimized - uses SLURM_TMPDIR)
 static char* get_unified_lock_path(void) {
@@ -34,20 +52,8 @@ static char* get_unified_lock_path(void) {
         return lock_path;
     }
     
-    // Use SLURM_TMPDIR only (per-job, auto-cleaned) - not regular /tmp
     char* tmpdir = getenv("SLURM_TMPDIR");
-    if (tmpdir == NULL) {
-        // No SLURM_TMPDIR - this should only happen outside SLURM jobs
-        // Use a job-specific path if we have job ID
-        char* job_id = getenv("SLURM_JOB_ID");
-        if (job_id != NULL) {
-            // We're in a SLURM job but SLURM_TMPDIR not set - use /tmp with job ID
-            tmpdir = "/tmp";
-        } else {
-            // Not in SLURM job - use /tmp (for local testing only)
-            tmpdir = "/tmp";
-        }
-    }
+    if (tmpdir == NULL) tmpdir = "/tmp";
     
     // Include job ID for isolation
     char* job_id = getenv("SLURM_JOB_ID");
@@ -73,50 +79,42 @@ static char* get_unified_lock_path(void) {
     return lock_path;
 }
 
-const char* unified_lock = NULL;  // Will be set dynamically
-const int retry_count=20;
+static int unified_lock_fd = -1;
 extern size_t context_size;
 extern int cuda_to_nvml_map_array[CUDA_DEVICE_MAX_COUNT];
 
-// 0 unified_lock lock success
-// -1 unified_lock lock fail
+/** Acquire an exclusive flock on the unified lock file. Returns 0 on success. */
 int try_lock_unified_lock() {
-    // Get lock path (SLURM-aware)
-    if (unified_lock == NULL) {
-        unified_lock = get_unified_lock_path();
-    }
-    
-    // initialize the random number seed
-    srand(time(NULL));
-    int fd = open(unified_lock,O_CREAT | O_EXCL,S_IRWXU);
-    int cnt = 0;
-    while (fd == -1 && cnt <= retry_count) {
-        if (cnt == retry_count) {
-            LOG_MSG("unified_lock expired,removing...");
-            int res = remove(unified_lock);
-            LOG_MSG("remove unified_lock:%d",res);
-        }else{
-            LOG_MSG("unified_lock locked, waiting 1 second...");
-            sleep(rand()%5 + 1);
+    if (unified_lock_fd == -1) {
+        const char* path = get_unified_lock_path();
+        unified_lock_fd = open(path, O_CREAT | O_RDWR, 0600);
+        if (unified_lock_fd == -1) {
+            LOG_ERROR("try_lock_unified_lock: open(%s) failed errno=%d", path, errno);
+            return -1;
         }
-        cnt++;
-        fd = open(unified_lock,O_CREAT | O_EXCL,S_IRWXU); 
     }
-    if (fd != -1) {
-        close(fd);
-        return 0;
+    if (flock(unified_lock_fd, LOCK_EX) != 0) {
+        LOG_ERROR("try_lock_unified_lock: flock failed errno=%d", errno);
+        return -1;
     }
-    return -1;
+    return 0;
 }
 
-// 0 unified_lock unlock success
-// -1 unified_lock unlock fail
+/** Release the flock on the unified lock file. Returns 0 on success. */
 int try_unlock_unified_lock() {
-    int res = remove(unified_lock);
-    return res == 0 ? 0 : -1;
+    if (unified_lock_fd == -1) return -1;
+    if (flock(unified_lock_fd, LOCK_UN) != 0) {
+        LOG_ERROR("try_unlock_unified_lock: flock unlock failed errno=%d", errno);
+        return -1;
+    }
+    return 0;
 }
 
-int mergepid(unsigned int *prev, unsigned int *current, nvmlProcessInfo_t1 *sub, nvmlProcessInfo_t1 *merged) {
+/**
+ * Merge new process entries from sub into merged, skipping duplicates and invalid PIDs.
+ * @return 0 on success.
+ */
+int mergepid(unsigned int *prev, unsigned int *current, nvmlProcessInfo_t *sub, nvmlProcessInfo_t *merged) {
     int i,j;
     int found=0;
     
@@ -154,17 +152,22 @@ int mergepid(unsigned int *prev, unsigned int *current, nvmlProcessInfo_t1 *sub,
     return 0;
 }
 
-int getextrapid(unsigned int prev, unsigned int current, nvmlProcessInfo_t1 *pre_pids_on_device, nvmlProcessInfo_t1 *pids_on_device) {
+/** Find the PID present in pids_on_device but absent from pre_pids_on_device. */
+int getextrapid(unsigned int prev, unsigned int current, nvmlProcessInfo_t *pre_pids_on_device, nvmlProcessInfo_t *pids_on_device) {
     int i,j;
     int found = 0;
     LOG_DEBUG("getextrapid: prev=%u current=%u", prev, current);
-    if (current-prev<=0) {
+    if (current <= prev) {
         LOG_WARN("getextrapid: current (%u) <= prev (%u), cannot find new PID", current, prev);
         return 0;
     }
-    for (i=0; i<current; i++) {
+    if (current > SHARED_REGION_MAX_PROCESS_NUM)
+        current = SHARED_REGION_MAX_PROCESS_NUM;
+    if (prev > SHARED_REGION_MAX_PROCESS_NUM)
+        prev = SHARED_REGION_MAX_PROCESS_NUM;
+    for (i=0; i<(int)current; i++) {
         found = 0;
-        for (j=0; j<prev; j++) {
+        for (j=0; j<(int)prev; j++) {
             if (pids_on_device[i].pid == pre_pids_on_device[j].pid) {
                 found = 1;
                 break;
@@ -179,11 +182,19 @@ int getextrapid(unsigned int prev, unsigned int current, nvmlProcessInfo_t1 *pre
     return 0;
 }
 
+/**
+ * Detect the NVML-visible host PID for the current process.
+ *
+ * Snapshots the NVML process list, creates a temporary CUDA context to make
+ * the current process appear, then diffs the lists. Falls back to getpid()
+ * if the PID cannot be found via differencing. Registers the host PID in
+ * the shared region and records the initial context memory size.
+ */
 nvmlReturn_t set_task_pid() {
     unsigned int running_processes=0,previous=0,merged_num=0;
-    nvmlProcessInfo_v1_t tmp_pids_on_device[SHARED_REGION_MAX_PROCESS_NUM];
-    nvmlProcessInfo_t1 pre_pids_on_device[SHARED_REGION_MAX_PROCESS_NUM];
-    nvmlProcessInfo_t1 pids_on_device[SHARED_REGION_MAX_PROCESS_NUM];
+    nvmlProcessInfo_t tmp_pids_on_device[SHARED_REGION_MAX_PROCESS_NUM];
+    nvmlProcessInfo_t pre_pids_on_device[SHARED_REGION_MAX_PROCESS_NUM];
+    nvmlProcessInfo_t pids_on_device[SHARED_REGION_MAX_PROCESS_NUM];
     nvmlDevice_t device;
     nvmlReturn_t res;
     CUcontext pctx;
@@ -207,11 +218,6 @@ nvmlReturn_t set_task_pid() {
             continue;
         }
         CHECK_NVML_API(nvmlDeviceGetHandleByIndex(i, &device));
-        // CRITICAL: Initialize version field for all structs before calling NVML
-        // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-        for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
-            tmp_pids_on_device[j].version = nvmlProcessInfo_v2;
-        }
         do{
             // Bypass our filtering hook - call real NVML function directly to get ALL processes
             // This is needed for PID detection to work correctly
@@ -226,19 +232,17 @@ nvmlReturn_t set_task_pid() {
         // Log raw NVML data before merging (for debugging PID=0 issues and struct mismatches)
         LOG_DEBUG("set_task_pid: BEFORE context - NVML returned %u processes on device %d", previous, i);
         for (int k=0; k<previous && k<10; k++) {  // Log first 10 to avoid spam
-            unsigned int safe_pid = extract_pid_safely((void *)&tmp_pids_on_device[k]);
-            if (safe_pid != tmp_pids_on_device[k].pid && safe_pid != 0) {
-                LOG_WARN("  Raw NVML[%d]: STRUCT MISMATCH - header_pid=%u, safe_pid=%u", 
-                         k, tmp_pids_on_device[k].pid, safe_pid);
+            if (tmp_pids_on_device[k].pid == 0) {
+                LOG_WARN("  Raw NVML[%d]: INVALID PID=0", k);
             }
         }
         
-        mergepid(&previous,&merged_num,(nvmlProcessInfo_t1 *)tmp_pids_on_device,pre_pids_on_device);
+        mergepid(&previous,&merged_num,tmp_pids_on_device,pre_pids_on_device);
         break;
     }
     previous = merged_num;
     merged_num = 0;
-    memset(tmp_pids_on_device,0,sizeof(nvmlProcessInfo_v1_t)*SHARED_REGION_MAX_PROCESS_NUM);
+    memset(tmp_pids_on_device,0,sizeof(nvmlProcessInfo_t)*SHARED_REGION_MAX_PROCESS_NUM);
     CHECK_CU_RESULT(cuDevicePrimaryCtxRetain(&pctx,0));
     for (i=0;i<nvmlCounts;i++) {
         cudaDev=nvml_to_cuda_map(i);
@@ -246,11 +250,6 @@ nvmlReturn_t set_task_pid() {
             continue;
         }
         CHECK_NVML_API(nvmlDeviceGetHandleByIndex (i, &device)); 
-        // CRITICAL: Initialize version field for all structs before calling NVML
-        // This ensures compatibility with different driver versions (CUDA 12.2 vs driver 570.195.03)
-        for (unsigned int j = 0; j < SHARED_REGION_MAX_PROCESS_NUM; j++) {
-            tmp_pids_on_device[j].version = nvmlProcessInfo_v2;
-        }
         do{
             // Bypass our filtering hook - call real NVML function directly to get ALL processes
             // This is needed for PID detection to work correctly
@@ -265,14 +264,12 @@ nvmlReturn_t set_task_pid() {
         // Log raw NVML data after creating context (for debugging PID=0 issues and struct mismatches)
         LOG_DEBUG("set_task_pid: AFTER context - NVML returned %u processes on device %d", running_processes, i);
         for (int k=0; k<running_processes && k<10; k++) {  // Log first 10 to avoid spam
-            unsigned int safe_pid = extract_pid_safely((void *)&tmp_pids_on_device[k]);
-            if (safe_pid != tmp_pids_on_device[k].pid && safe_pid != 0) {
-                LOG_WARN("  Raw NVML[%d]: STRUCT MISMATCH - header_pid=%u, safe_pid=%u", 
-                         k, tmp_pids_on_device[k].pid, safe_pid);
+            if (tmp_pids_on_device[k].pid == 0) {
+                LOG_WARN("  Raw NVML[%d]: INVALID PID=0", k);
             }
         }
         
-        mergepid(&running_processes,&merged_num,(nvmlProcessInfo_t1 *)tmp_pids_on_device,pids_on_device);
+        mergepid(&running_processes,&merged_num,tmp_pids_on_device,pids_on_device);
         break;
     }
     running_processes = merged_num;
@@ -357,6 +354,7 @@ int parse_cuda_visible_env() {
     return count;
 }
 
+/** Parse CUDA_VISIBLE_DEVICES and populate the CUDA-to-NVML device mapping. */
 int map_cuda_visible_devices() {
     parse_cuda_visible_env();
     return 0;

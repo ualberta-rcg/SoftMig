@@ -1,3 +1,11 @@
+/**
+ * @file libnvml_hook.h
+ * @brief NVML hook table and dispatch macros for intercepting NVML calls.
+ *
+ * Defines the entry_t dispatch table, the NVML_OVERRIDE_CALL macro for
+ * invoking real NVML functions through dynamically loaded symbols, and
+ * the enum that indexes every hooked NVML function.
+ */
 #ifndef __LIBNVML_HOOK_H__
 #define __LIBNVML_HOOK_H__
 
@@ -15,13 +23,6 @@
 #include "include/nvml-subset.h"
 #include "include/log_utils.h"
 #include "include/nvml_prefix.h"
-
-// Alias for compatibility - nvmlProcessInfo_v1_t from system nvml.h
-// This is needed when we don't include system <nvml.h> to avoid conflicts
-#ifndef __NVML_H__
-// Only define if system nvml.h is not included
-typedef nvmlProcessInfo_t nvmlProcessInfo_v1_t;
-#endif
 
 #define FILENAME_MAX 4096
 
