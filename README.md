@@ -12,7 +12,8 @@ Like NVIDIA's hardware MIG, SoftMig enables software-based GPU slicing for any G
 
 - `CHANGES.md`: release-level architecture and behavior changes
 - `docs/PROJECT_STATUS.md`: current operational status and open follow-ups
-- `docs/NVML_STRUCT_MISMATCH_HISTORY.md`: historical NVML mismatch fix record
+- `docs/FIXES_TO_APPLY.md`: actionable checklist of remaining fixes
+- `docs/BUILD_AND_INSTALL.md`: build, install, and safe `unshare -m` update guide
 
 ## SoftMig vs. NVIDIA Hardware MIG
 
@@ -62,116 +63,12 @@ SoftMig is optimized for SLURM cluster environments with the following key impro
 - ✅ **Enforcement**: System-wide preload ensures users cannot disable the library
 - ✅ **Auto-cleanup**: Cache files automatically cleaned when job ends (SLURM_TMPDIR is job-specific)
 
-## Building
+## Building and Installation
 
-### System Requirements
+Build, install, and live-update instructions (including safe `unshare -m`
+library replacement under `/etc/ld.so.preload`) are maintained in:
 
-**Required on the build system:**
-- **CMake** (version 2.8.11 or later)
-- **GCC** or compatible C compiler with support for `-fPIC` and `-shared` flags
-- **CUDA Toolkit 12+** (CUDA 12.2 or later recommended; CUDA 11 does not work)
-  - CUDA headers and libraries (`libcuda.so`, `libnvidia-ml.so`)
-  - Note: SoftMig works with all CUDA 12+ versions (tested with 12.2, 12.3, 13.0)
-- **Git** (optional, for version information in build)
-- **Make** (for building)
-
-**Required on the runtime system (compute nodes):**
-- **NVIDIA GPU driver** (compatible with CUDA 12+)
-- **SLURM** (for job management and `SLURM_TMPDIR`)
-- **nvidia-smi** (for GPU queries; can be replaced with `nvidia-smi-hook.sh` for filtered output)
-
-**Note**: The CUDA toolkit is only needed for building. At runtime, SoftMig uses the system's NVIDIA driver libraries (`libcuda.so`, `libnvidia-ml.so.1`) which are provided by the GPU driver installation.
-
-### For Digital Research Alliance Canada / Compute Canada (CVMFS)
-
-When building via CVMFS (module system), CUDA is provided via environment modules:
-
-```bash
-# Load CUDA module from CVMFS
-# NOTE: CUDA 12+ required (CUDA 11 does not work)
-# SoftMig works with all CUDA 12+ versions (12.2, 12.3, 13.0, etc.)
-module load cuda/12.2  # Recommended
-# Or: module load cuda/13.0
-# Or: module load cuda/12.3
-
-# Navigate to SoftMig directory
-cd ~/softmig-testing/SoftMig/
-
-# Clean previous build (optional but recommended)
-rm -rf build
-
-# Pull latest changes (if using git)
-git pull
-
-# Build the library
-./build.sh
-
-# The library will be in: build/libsoftmig.so
-```
-
-**Installation (as admin):**
-
-```bash
-# Create required directories
-sudo mkdir -p /var/lib/shared /var/log/softmig /var/run/softmig
-
-# Set directory permissions (CRITICAL: directory must be readable/executable by all)
-sudo chmod 755 /var/lib/shared  # drwxr-xr-x (readable/executable by all)
-sudo chown root:root /var/lib/shared
-
-# Copy library
-sudo cp build/libsoftmig.so /var/lib/shared/
-sudo chmod 644 /var/lib/shared/libsoftmig.so  # rw-r--r-- (readable by all)
-sudo chown root:root /var/lib/shared/libsoftmig.so
-
-# Log directory: MUST allow any user to write (directory itself, not just files)
-# CRITICAL: Users need write permission on the directory to CREATE new log files
-# Option 1: Group writable (recommended - more secure)
-if getent group slurm >/dev/null 2>&1; then
-    sudo chown root:slurm /var/log/softmig
-    sudo chmod 775 /var/log/softmig  # drwxrwxr-x (group writable - allows group to create files)
-    # Ensure all SLURM users are in the slurm group
-else
-    # Option 2: Sticky bit + world writable (less secure but works)
-    sudo chown root:root /var/log/softmig
-    sudo chmod 1777 /var/log/softmig  # drwxrwxrwt (world writable - allows anyone to create files, sticky bit prevents deletion of others' files)
-fi
-
-# Config directory (readable by all, writable only by root)
-sudo chown root:root /var/run/softmig
-sudo chmod 755 /var/run/softmig  # drwxr-xr-x
-
-# Configure system-wide preload (REQUIRED for production - users cannot disable it)
-echo "/var/lib/shared/libsoftmig.so" | sudo tee -a /etc/ld.so.preload
-sudo chmod 644 /etc/ld.so.preload  # rw-r--r-- (readable by all)
-sudo chown root:root /etc/ld.so.preload
-```
-
-### For Other Systems
-
-```bash
-# Set CUDA_HOME to your CUDA installation
-# NOTE: CUDA 12+ required (CUDA 11 does not work)
-export CUDA_HOME=/path/to/cuda-12.2
-# Or: export CUDA_HOME=/path/to/cuda-13.0
-
-# Build the library
-./build.sh
-
-# Install (same steps as CVMFS above)
-sudo mkdir -p /var/lib/shared /var/log/softmig /var/run/softmig
-
-# Set directory permissions (CRITICAL: directory must be readable/executable by all)
-sudo chmod 755 /var/lib/shared  # drwxr-xr-x (readable/executable by all)
-sudo chown root:root /var/lib/shared
-
-# Copy library
-sudo cp build/libsoftmig.so /var/lib/shared/
-sudo chmod 644 /var/lib/shared/libsoftmig.so  # rw-r--r-- (readable by all)
-sudo chown root:root /var/lib/shared/libsoftmig.so
-
-# ... (follow remaining installation steps from CVMFS section)
-```
+- `docs/BUILD_AND_INSTALL.md`
 
 ## Usage
 
@@ -443,88 +340,19 @@ grep -i error /var/log/softmig/*.log
 
 ## Deployment for Cluster Administrators
 
-### Installation
+### Installation and Library Updates
 
-Use the automated installation script (recommended):
-```bash
-# As root
-sudo ./docs/examples/install_softmig.sh /path/to/build/libsoftmig.so
-```
+Build/install/update runbook is centralized in:
 
-The installation script:
-- Creates required directories (`/var/lib/shared`, `/var/log/softmig`, `/var/run/softmig`)
-- Copies library to `/var/lib/shared/libsoftmig.so`
-- Sets proper permissions (644 for library, 775/1777 for log directory, 755 for config directory)
-- Configures `/etc/ld.so.preload` (temporarily disables if already present to allow safe installation)
-- Verifies installation
+- `docs/BUILD_AND_INSTALL.md`
 
-Or install manually (see Building section above for full steps).
+That guide includes:
 
-### Updating the Library
-
-When updating SoftMig on a running system, you cannot simply overwrite the library file because it's currently loaded via `/etc/ld.so.preload`. The library file is locked while in use.
-
-**Safe update procedure** (using `unshare -m` to temporarily mask `/etc/ld.so.preload`):
-
-```bash
-# As root
-# This creates a new mount namespace, mounts /dev/null over /etc/ld.so.preload,
-# then copies the new library (the old library is no longer "preloaded" in this namespace)
-unshare -m -- sh -c "mount --bind /dev/null /etc/ld.so.preload && cp /home/rahimk/softmig-testing/SoftMig/build/libsoftmig.so /usr/local/lib/"
-
-# Set permissions
-chmod 644 /usr/local/lib/libsoftmig.so
-chown root:root /usr/local/lib/libsoftmig.so
-
-# Ensure /usr/local/lib is readable/executable by all
-chmod 755 /usr/local/lib
-```
-
-**Alternative locations**: The library can be installed to:
-- `/var/lib/shared/libsoftmig.so` (default, recommended)
-- `/usr/local/lib/libsoftmig.so` (alternative, as shown above)
-- Any location readable by all users (ensure directory has `755` permissions)
-
-**Important**: After updating, ensure `/etc/ld.so.preload` points to the correct path:
-```bash
-# Check current path in /etc/ld.so.preload
-cat /etc/ld.so.preload
-
-# If you changed the location, update /etc/ld.so.preload:
-echo "/usr/local/lib/libsoftmig.so" | sudo tee /etc/ld.so.preload
-# Or if using /var/lib/shared:
-echo "/var/lib/shared/libsoftmig.so" | sudo tee /etc/ld.so.preload
-```
-
-**Why `unshare -m` is needed**:
-- When a library is loaded via `/etc/ld.so.preload`, Linux locks the file
-- You cannot overwrite a locked file
-- `unshare -m` creates a new mount namespace where `/etc/ld.so.preload` is masked with `/dev/null`
-- In this namespace, the old library is no longer "preloaded", so the file can be overwritten
-- After the command completes, the new library is in place and will be loaded by new processes
-
-**Important Permissions:**
-- **Library file**: `644` (rw-r--r--) - readable by all
-  - `/var/lib/shared/libsoftmig.so` (default location)
-  - Or `/usr/local/lib/libsoftmig.so` (alternative location)
-- **Library directory**: `755` (drwxr-xr-x) - **CRITICAL**: Directory must be readable/executable by all (execute permission allows users to access files inside)
-  - `/var/lib/shared/` or `/usr/local/lib/`
-- `/var/log/softmig/`: `775` (drwxrwxr-x) with `slurm` group, or `1777` (drwxrwxrwt) with sticky bit
-  - **CRITICAL**: Directory must be writable by users (write permission on directory allows users to CREATE new log files)
-  - Even if log files have write permissions, users cannot create new files without write permission on the directory
-- `/var/run/softmig/`: `755` (drwxr-xr-x) - readable by all, writable only by root
-- `/etc/ld.so.preload`: `644` (rw-r--r--) - readable by all
-
-**Verification** (test that users can access the library):
-```bash
-# Test as a regular user
-sudo -u <test_user> ls -l /var/lib/shared/libsoftmig.so
-# Should succeed without "Permission denied" errors
-
-# If it fails, check directory permissions:
-ls -ld /var/lib/shared
-# Should show: drwxr-xr-x (755)
-```
+- initial installation (script and manual)
+- permissions model (`/var/lib/shared`, `/var/log/softmig`, `/var/run/softmig`)
+- `/etc/ld.so.preload` setup
+- safe live library replacement with `unshare -m`
+- post-install verification steps
 
 ### SLURM Configuration
 

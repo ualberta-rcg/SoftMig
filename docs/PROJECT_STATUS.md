@@ -53,7 +53,4 @@ historical handoff/checklist/backlog files into one place.
 
 ## Historical References
 
-- Fixed NVML mismatch record:
-  `docs/NVML_STRUCT_MISMATCH_HISTORY.md`
-- High-level release history:
-  `CHANGES.md`
+- High-level release history: `CHANGES.md`
