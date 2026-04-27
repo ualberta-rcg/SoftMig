@@ -1,4 +1,14 @@
-# SoftMig - Software GPU Slicing for SLURM Clusters
+# University of Alberta - SoftMig 
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![MkDocs Site](https://img.shields.io/badge/Docs-Live-blue?style=flat-square)](https://ualberta-rcg.github.io/ragflow-wiki-data/)
+[![Full Pipeline](https://img.shields.io/badge/Pipeline-Weekly-purple?style=flat-square)](https://github.com/ualberta-rcg/ragflow-wiki-data/actions/workflows/full-pipeline.yml)
+
+**Maintained by:** Rahim Khoja ([khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)) and Kahim Ali ([kali2@ualberta.ca](mailto:kali2@ualberta.ca)) 
+
+---
+
+## Description
 
 **SoftMig** is a fork of [HAMi-core](https://github.com/Project-HAMi/HAMi-core) optimized for **Digital Research Alliance Canada (DRAC) / Compute Canada** SLURM environments. It provides software-based GPU memory and compute cycle limiting for oversubscribed GPU partitions.
 
@@ -618,6 +628,38 @@ For example, running `(./gpu_burn -tc 3600 &); (./gpu_burn -tc 3600 &)` with a s
 - **SM Limiting**: GPU compute utilization limiting works via kernel launch throttling. Only monitors device 0 (intentional for fractional jobs that receive one GPU).
 - **Log directory permissions**: `/var/log/softmig` must be writable by all users (see Logging section)
 
+
+## References
+
+* [Digital Research Alliance of Canada](https://alliancecan.ca/)
+* [Alliance Documentation (Source)](https://docs.alliancecan.ca/)
+* [PAICE (Pan-Canadian AI Compute Environment)](https://alliancecan.ca/en/services/advanced-research-computing/pan-canadian-ai-compute-environment-paice)
+* [RAGFlow](https://ragflow.io/)
+* [MkDocs Material](https://squidfunk.github.io/mkdocs-material/)
+* [Research Computing Group](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html)
+* [AMII](https://www.amii.ca/) — [Amii-Open-Source](https://github.com/Amii-Open-Source) — [amiithinks](https://github.com/amiithinks)
+* [U of A RCG GitHub](https://github.com/ualberta-rcg)
+* [Vulcan Login / OOD](https://vulcan.alliancecan.ca) — [Vulcan Portal](https://portal.vulcan.alliancecan.ca)
+
+---
+
+## Support
+
+Many Bothans died to bring us this information. This project is provided as-is, but reasonable questions may be answered based on my coffee intake or mood. ;)
+
+Feel free to open an [issue](https://github.com/ualberta-rcg/ragflow-wiki-data/issues) or email **[khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)** or **[kali2@ualberta.ca](mailto:kali2@ualberta.ca)** for U of A related deployments.
+
+---
+
 ## License
 
-Same as original [HAMi-core](https://github.com/Project-HAMi/HAMi-core) project.
+This project is released under the **MIT License** — see [LICENSE](./LICENSE) for details.
+
+---
+
+## About University of Alberta Research Computing
+
+The [Research Computing Group](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html) supports high-performance computing, data-intensive research, and advanced infrastructure for researchers at the University of Alberta and across Canada through the [Digital Research Alliance of Canada](https://alliancecan.ca/).
+
+The [Alberta Machine Intelligence Institute (AMII)](https://amii.ca/) is one of Canada's three national AI institutes and co-operates the Vulcan cluster for machine learning research workloads.
+
