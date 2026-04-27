@@ -10,13 +10,17 @@
 
 ## Description
 
-**SoftMig** is a fork of [HAMi-core](https://github.com/Project-HAMi/HAMi-core) optimized for **Digital Research Alliance Canada (DRAC) / Compute Canada** SLURM environments. It provides software-based GPU memory and compute cycle limiting for oversubscribed GPU partitions.
+**SoftMig** is a SLURM-integrated software GPU slicing system for shared NVIDIA GPU clusters. It lets administrators schedule ordinary NVIDIA GPUs in a MIG-like way using software-enforced memory limits, compute time-slicing, and SLURM prolog/epilog automation.
 
-Like NVIDIA's hardware MIG, SoftMig enables software-based GPU slicing for any GPU:
-- **GPU Memory Slicing**: Divide GPU memory among multiple jobs (e.g., 12GB, 24GB slices on 48GB GPUs)
-- **GPU Compute Slicing**: Limit SM utilization per job (e.g., 25%, 50% of GPU cycles)
-- **Oversubscription**: Run 2-8 jobs per GPU safely
-- **SLURM Integration**: Uses `SLURM_TMPDIR` for per-job isolation (cache files, locks) - no shared `/tmp` conflicts
+SoftMig does **not** enable, modify, or replace NVIDIA Hardware MIG. Instead, it provides a scheduler-controlled software layer that allows fractional GPU jobs to run on GPUs that do not support hardware MIG, or on clusters where hardware MIG is too rigid for day-to-day research scheduling.
+
+The goal is to let SLURM treat each GPU as a flexible shared resource. A 48GB GPU, for example, can be offered as a full GPU, two half-GPU slices, four quarter-GPU slices, or other site-defined layouts. Each job receives a configured memory limit and proportional access to GPU compute through time-slicing and SM throttling.
+
+Unlike Hardware MIG, SoftMig slice layouts can be changed dynamically through SLURM policy without draining nodes, rebooting, or changing GPU MIG mode. This allows mixed workloads to run across the same GPU nodes: full-GPU jobs, half-GPU jobs, quarter-GPU jobs, and other fractional jobs can coexist according to normal SLURM scheduling rules.
+
+Forked from [HAMi-core](https://github.com/Project-HAMi/HAMi-core), SoftMig has been adapted for multi-user HPC environments. It uses secure per-job configuration files under `/var/run/softmig`, per-job cache and lock isolation under `$SLURM_TMPDIR`, file-only logging, SLURM prolog/epilog lifecycle management, and optional system-wide preload enforcement through `/etc/ld.so.preload`.
+
+SoftMig is intended for Digital Research Alliance of Canada / Compute Canada-style research clusters where GPU utilization, scheduling flexibility, and broad NVIDIA GPU compatibility matter more than hardware-level isolation.
 
 ## Project Documents
 
