@@ -366,12 +366,8 @@ When enabled, SoftMig kills matching GPU processes from the current SLURM job cg
 * [Digital Research Alliance of Canada](https://alliancecan.ca/)
 * [Alliance Documentation (Source)](https://docs.alliancecan.ca/)
 * [PAICE (Pan-Canadian AI Compute Environment)](https://alliancecan.ca/en/services/advanced-research-computing/pan-canadian-ai-compute-environment-paice)
-* [RAGFlow](https://ragflow.io/)
-* [MkDocs Material](https://squidfunk.github.io/mkdocs-material/)
 * [Research Computing Group](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html)
 * [AMII](https://www.amii.ca/) — [Amii-Open-Source](https://github.com/Amii-Open-Source) — [amiithinks](https://github.com/amiithinks)
-* [U of A RCG GitHub](https://github.com/ualberta-rcg)
-* [Vulcan Login / OOD](https://vulcan.alliancecan.ca) — [Vulcan Portal](https://portal.vulcan.alliancecan.ca)
 
 ---
 
