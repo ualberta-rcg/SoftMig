@@ -76,13 +76,13 @@ sbatch --gres=gpu:l40s:1 --time=2:00:00 job.sh
 - [University of Alberta Research Computing](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html)
 - [Alberta Machine Intelligence Institute (AMII)](https://www.amii.ca/)
 - [HAMi-core (upstream project)](https://github.com/Project-HAMi/HAMi-core)
-- [External docs (ragflow-hosted)](https://ualberta-rcg.github.io/ragflow-wiki-data/)
+- [Vulcan Docs](https://ualberta-rcg.github.io/ragflow-wiki-data/)
 
 ---
 
 ## Support
 
-This project is provided as-is, but reasonable questions may be answered based on my coffee intake or mood. ;)
+Many Bothans died to bring us this information. This project is provided as-is, but reasonable questions may be answered based on my coffee intake or mood. ;)
 
 Feel free to open an [issue](https://github.com/ualberta-rcg/SoftMig/issues) or email **[khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)** or **[kali2@ualberta.ca](mailto:kali2@ualberta.ca)** for U of A related deployments.
 
@@ -97,3 +97,5 @@ This project is released under the **MIT License** — see [LICENSE](./LICENSE) 
 ## About University of Alberta Research Computing
 
 The [Research Computing Group](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html) supports high-performance computing, data-intensive research, and advanced infrastructure for researchers at the University of Alberta and across Canada through the [Digital Research Alliance of Canada](https://alliancecan.ca/).
+
+The [Alberta Machine Intelligence Institute (AMII)](https://amii.ca/) is one of Canada's three national AI institutes and co-operates the Vulcan cluster for machine learning research workloads.
