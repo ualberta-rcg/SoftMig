@@ -27,7 +27,7 @@ This document is the canonical guide for building, installing, and updating
 # (use module spider on your cluster if needed)
 module load cuda/12.2
 
-cd ~/softmig-testing/SoftMig/
+cd /path/to/SoftMig/
 rm -rf build
 git pull
 ./build.sh

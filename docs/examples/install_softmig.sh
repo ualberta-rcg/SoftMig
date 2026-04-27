@@ -11,7 +11,7 @@ RED='\033[0;31m'
 NC='\033[0m' # No Color
 
 # Configuration
-LIB_SOURCE="${1:-/global/home/rahimk/SoftMig/build/libsoftmig.so}"
+LIB_SOURCE="${1:?Usage: $0 /path/to/libsoftmig.so}"
 LIB_DEST="/var/lib/shared/libsoftmig.so"
 PRELOAD_FILE="/etc/ld.so.preload"
 
@@ -120,7 +120,8 @@ else
 fi
 echo ""
 echo "  Testing user access:"
-if sudo -u rahimk ls -l "$LIB_DEST" >/dev/null 2>&1; then
+    TEST_USER="${SUDO_USER:-nobody}"
+    if sudo -u "$TEST_USER" ls -l "$LIB_DEST" >/dev/null 2>&1; then
     echo -e "    ${GREEN}✓ Users can access the library${NC}"
 else
     echo -e "    ${RED}✗ ERROR: Users cannot access the library!${NC}"
