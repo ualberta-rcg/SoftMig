@@ -82,6 +82,14 @@ SoftMig includes an optional `nvidia-smi` wrapper that filters process output by
 
 SoftMig operates below ML frameworks at the CUDA driver/runtime level. PyTorch, TensorFlow, JAX, MXNet, and other CUDA applications are subject to the same limits without framework-specific integration.
 
+
+## Project Documents
+
+- `CHANGES.md`: release-level architecture and behavior changes
+- `docs/PROJECT_STATUS.md`: current operational status and open follow-ups
+- `docs/FIXES_TO_APPLY.md`: actionable checklist of remaining fixes
+- `docs/BUILD_AND_INSTALL.md`: build, install, and safe `unshare -m` update guide
+
 ## SoftMig vs. NVIDIA Hardware MIG
 
 | Feature | SoftMig (Software MIG) | NVIDIA Hardware MIG |
@@ -123,12 +131,6 @@ SoftMig is optimized for SLURM cluster environments with the following key impro
 | **Multi-CUDA Support** | CUDA 11+ | ✅ CUDA 12+ (CUDA 11 does not work) |
 | **Library Name** | `libvgpu.so` | ✅ `libsoftmig.so` |
 
-**Key Benefits:**
-- ✅ **Job Isolation**: Each SLURM job gets its own cache/lock files in `SLURM_TMPDIR` (no conflicts)
-- ✅ **Security**: Config files in `/var/run/softmig/` prevent users from modifying limits
-- ✅ **Silent Operation**: No user-visible logs (file-only logging)
-- ✅ **Enforcement**: System-wide preload ensures users cannot disable the library
-- ✅ **Auto-cleanup**: Cache files automatically cleaned when job ends (SLURM_TMPDIR is job-specific)
 
 ## Building and Installation
 
@@ -698,12 +700,6 @@ For example, running `(./gpu_burn -tc 3600 &); (./gpu_burn -tc 3600 &)` with a s
 * [U of A RCG GitHub](https://github.com/ualberta-rcg)
 * [Vulcan Login / OOD](https://vulcan.alliancecan.ca) — [Vulcan Portal](https://portal.vulcan.alliancecan.ca)
 
-## Project Documents
-
-- `CHANGES.md`: release-level architecture and behavior changes
-- `docs/PROJECT_STATUS.md`: current operational status and open follow-ups
-- `docs/FIXES_TO_APPLY.md`: actionable checklist of remaining fixes
-- `docs/BUILD_AND_INSTALL.md`: build, install, and safe `unshare -m` update guide
 
 ---
 
