@@ -8,6 +8,12 @@ Like NVIDIA's hardware MIG, SoftMig enables software-based GPU slicing for any G
 - **Oversubscription**: Run 2-8 jobs per GPU safely
 - **SLURM Integration**: Uses `SLURM_TMPDIR` for per-job isolation (cache files, locks) - no shared `/tmp` conflicts
 
+## Project Documents
+
+- `CHANGES.md`: release-level architecture and behavior changes
+- `docs/PROJECT_STATUS.md`: current operational status and open follow-ups
+- `docs/NVML_STRUCT_MISMATCH_HISTORY.md`: historical NVML mismatch fix record
+
 ## SoftMig vs. NVIDIA Hardware MIG
 
 | Feature | SoftMig (Software MIG) | NVIDIA Hardware MIG |
@@ -577,7 +583,7 @@ ls -ld /var/lib/shared
 | l40s.2 (half) | 2 shards | 24GB | 50% | 2x | Medium models, 2x oversubscription |
 | l40s.4 (quarter) | 1 shard | 12GB | 25% | 4x | Small models, 4x oversubscription |
 
-**SM Limiting:** GPU compute utilization limiting works via kernel launch throttling. Only monitors device 0 (intentional - fractional GPU jobs only get 1 GPU). See [docs/GPU_LIMITER_EXPLANATION.md](docs/GPU_LIMITER_EXPLANATION.md) for technical details.
+**SM Limiting:** GPU compute utilization limiting works via kernel launch throttling. Only monitors device 0 (intentional for fractional jobs that receive one GPU).
 
 ### Monitoring and Troubleshooting
 
@@ -781,7 +787,7 @@ This is why the user mentioned: `export SOFTMIG_LOG_LEVEL=3; cd ./gpu-burn/; (./
 - **Config files**: In SLURM jobs, limits come from secure config files (users cannot modify)
 - **Cache files**: Auto-cleaned when job ends (SLURM_TMPDIR is job-specific, unlike original HAMi-core which used shared `/tmp`)
 - **CUDA Version**: **CUDA 12+ required** (tested with CUDA 12.2, 12.3, 13.0). CUDA 11 does not work. SoftMig works with all CUDA 12+ versions.
-- **SM Limiting**: GPU compute utilization limiting works via kernel launch throttling. Only monitors device 0 (intentional - fractional GPU jobs only get 1 GPU). See [docs/GPU_LIMITER_EXPLANATION.md](docs/GPU_LIMITER_EXPLANATION.md) for details.
+- **SM Limiting**: GPU compute utilization limiting works via kernel launch throttling. Only monitors device 0 (intentional for fractional jobs that receive one GPU).
 - **Log directory permissions**: `/var/log/softmig` must be writable by all users (see Logging section)
 
 ## License

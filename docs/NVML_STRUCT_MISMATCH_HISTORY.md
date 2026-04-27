@@ -33,5 +33,4 @@ The mismatch remediation was implemented and validated:
 
 ## Current references
 
-- Open work: `docs/MASTER_FIX_CHECKLIST.md`
-- Open backlog: `docs/IMPROVEMENT_IDEAS.md`
+- Current open work and backlog: `docs/PROJECT_STATUS.md`
