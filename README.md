@@ -12,22 +12,75 @@
 
 **SoftMig** is a SLURM-integrated software GPU slicing system for shared NVIDIA GPU clusters. It lets administrators schedule ordinary NVIDIA GPUs in a MIG-like way using software-enforced memory limits, compute time-slicing, and SLURM prolog/epilog automation.
 
-SoftMig does **not** enable, modify, or replace NVIDIA Hardware MIG. Instead, it provides a scheduler-controlled software layer that allows fractional GPU jobs to run on GPUs that do not support hardware MIG, or on clusters where hardware MIG is too rigid for day-to-day research scheduling.
+SoftMig does **not** enable, modify, or replace NVIDIA Hardware MIG. Instead, it provides a scheduler-controlled software layer for running fractional GPU jobs on GPUs that do not support hardware MIG, or on clusters where hardware MIG is too rigid for day-to-day research scheduling.
 
 The goal is to let SLURM treat each GPU as a flexible shared resource. A 48GB GPU, for example, can be offered as a full GPU, two half-GPU slices, four quarter-GPU slices, or other site-defined layouts. Each job receives a configured memory limit and proportional access to GPU compute through time-slicing and SM throttling.
 
-Unlike Hardware MIG, SoftMig slice layouts can be changed dynamically through SLURM policy without draining nodes, rebooting, or changing GPU MIG mode. This allows mixed workloads to run across the same GPU nodes: full-GPU jobs, half-GPU jobs, quarter-GPU jobs, and other fractional jobs can coexist according to normal SLURM scheduling rules.
-
-Forked from [HAMi-core](https://github.com/Project-HAMi/HAMi-core), SoftMig has been adapted for multi-user HPC environments. It uses secure per-job configuration files under `/var/run/softmig`, per-job cache and lock isolation under `$SLURM_TMPDIR`, file-only logging, SLURM prolog/epilog lifecycle management, and optional system-wide preload enforcement through `/etc/ld.so.preload`.
+Unlike Hardware MIG, SoftMig slice layouts can be changed through SLURM policy without draining nodes, rebooting, or changing GPU MIG mode. This allows full-GPU jobs, half-GPU jobs, quarter-GPU jobs, and other fractional jobs to coexist across the same GPU nodes using normal SLURM scheduling.
 
 SoftMig is intended for Digital Research Alliance of Canada / Compute Canada-style research clusters where GPU utilization, scheduling flexibility, and broad NVIDIA GPU compatibility matter more than hardware-level isolation.
 
-## Project Documents
+## Features
 
-- `CHANGES.md`: release-level architecture and behavior changes
-- `docs/PROJECT_STATUS.md`: current operational status and open follow-ups
-- `docs/FIXES_TO_APPLY.md`: actionable checklist of remaining fixes
-- `docs/BUILD_AND_INSTALL.md`: build, install, and safe `unshare -m` update guide
+### GPU Memory Slicing
+
+SoftMig intercepts CUDA memory allocation calls and enforces a per-job GPU memory ceiling. When a job exceeds its limit, CUDA returns `CUDA_ERROR_OUT_OF_MEMORY`, similar to running on a smaller physical GPU.
+
+Memory usage is tracked across all processes in the same SLURM job using a file-backed shared memory region under `$SLURM_TMPDIR`, so MPI jobs, PyTorch DDP jobs, and other multi-process workloads share the same configured memory pool.
+
+### GPU Compute Slicing
+
+SoftMig limits GPU compute access using kernel launch throttling / SM time-slicing. Slice limits are expressed as percentages, such as `CUDA_DEVICE_SM_LIMIT=25` for a quarter-GPU job or `CUDA_DEVICE_SM_LIMIT=50` for a half-GPU job.
+
+This prevents small fractional jobs from monopolizing the GPU and allows multiple jobs to make meaningful forward progress on the same device.
+
+### Works on Any CUDA 12+ NVIDIA GPU
+
+Hardware MIG is limited to supported datacenter GPUs such as A100, H100, and newer MIG-capable devices. SoftMig works on ordinary NVIDIA GPUs with CUDA 12+ support, including L40S, A40, A30, V100, RTX-class cards, and others.
+
+If the NVIDIA driver loads and CUDA works, SoftMig can provide software slicing.
+
+### SLURM-Native Lifecycle Management
+
+SoftMig is managed through SLURM prolog and epilog scripts. The prolog creates a root-owned config file for each job under `/var/run/softmig/`, and the epilog removes it when the job ends.
+
+Users do not set their own limits. Limits are assigned by SLURM policy based on the requested GRES slice.
+
+### Dynamic Slice Layouts Without Node Downtime
+
+Slice layouts are defined by the SLURM prolog and optional Lua job submit plugin. Changing from one layout to another, such as 4 slices per GPU to 8 slices per GPU, does not require enabling MIG mode, draining the node, rebooting, or reconfiguring the GPU.
+
+Running jobs keep the limits they were assigned. New jobs pick up the new policy.
+
+### Per-Job Isolation
+
+SoftMig stores temporary state, cache files, and lock files under `$SLURM_TMPDIR`, which is job-specific and automatically cleaned up by SLURM.
+
+This avoids shared `/tmp` conflicts, cross-job cache collisions, and manual cleanup issues when multiple users share the same GPU node.
+
+### Scheduler-Enforced Configuration
+
+Config files are created by SLURM as root and stored under `/var/run/softmig/`. Users can inspect their job configuration for debugging, but they cannot modify the limits assigned by the scheduler.
+
+In production, SoftMig can be loaded through `/etc/ld.so.preload`, making enforcement system-wide and preventing users from bypassing it with their own environment.
+
+### Normal SLURM Cleanup Behavior
+
+SoftMig respects the SLURM job lifecycle. When a job exits or is killed, the associated GPU processes are cleaned up with the rest of the job processes, following normal SLURM and cgroup behavior.
+
+### Silent by Default
+
+SoftMig writes logs to `/var/log/softmig/{jobid}.log` and stays quiet during normal user jobs. Admins can inspect logs centrally, while users are not spammed with library output on stdout or stderr.
+
+Debug verbosity can be increased with `SOFTMIG_LOG_LEVEL` when needed.
+
+### Optional `nvidia-smi` Filtering
+
+SoftMig includes an optional `nvidia-smi` wrapper that filters process output by SLURM job cgroup. When several jobs share a GPU, users can see their own GPU processes without seeing every other user's workload on the device.
+
+### Framework Agnostic
+
+SoftMig operates below ML frameworks at the CUDA driver/runtime level. PyTorch, TensorFlow, JAX, MXNet, and other CUDA applications are subject to the same limits without framework-specific integration.
 
 ## SoftMig vs. NVIDIA Hardware MIG
 
@@ -644,6 +697,13 @@ For example, running `(./gpu_burn -tc 3600 &); (./gpu_burn -tc 3600 &)` with a s
 * [AMII](https://www.amii.ca/) — [Amii-Open-Source](https://github.com/Amii-Open-Source) — [amiithinks](https://github.com/amiithinks)
 * [U of A RCG GitHub](https://github.com/ualberta-rcg)
 * [Vulcan Login / OOD](https://vulcan.alliancecan.ca) — [Vulcan Portal](https://portal.vulcan.alliancecan.ca)
+
+## Project Documents
+
+- `CHANGES.md`: release-level architecture and behavior changes
+- `docs/PROJECT_STATUS.md`: current operational status and open follow-ups
+- `docs/FIXES_TO_APPLY.md`: actionable checklist of remaining fixes
+- `docs/BUILD_AND_INSTALL.md`: build, install, and safe `unshare -m` update guide
 
 ---
 
