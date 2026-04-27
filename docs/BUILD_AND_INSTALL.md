@@ -165,3 +165,9 @@ nvidia-smi
 - Epilog example: `docs/examples/epilog_softmig.sh`
 - Job submit plugin example: `docs/examples/job_submit_softmig.lua`
 - SLURM config snippet: `docs/slurm.conf.example`
+
+See also:
+
+- SLURM integration overview: `docs/SLURM_INTEGRATION.md`
+- User-facing usage: `docs/USAGE.md`
+- Troubleshooting: `docs/TROUBLESHOOTING.md`
