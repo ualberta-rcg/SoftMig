@@ -65,8 +65,6 @@ sbatch --gres=gpu:l40s:1 --time=2:00:00 job.sh
 | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | Common symptoms, quick checks, and fixes |
 | [docs/TESTING.md](docs/TESTING.md) | Smoke tests and framework tests |
 | [CHANGES.md](CHANGES.md) | Release-level architecture and behavior changes |
-| [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) | Current operational status and open follow-ups |
-| [docs/FIXES_TO_APPLY.md](docs/FIXES_TO_APPLY.md) | Actionable checklist of remaining work |
 
 ## References
 

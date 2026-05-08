@@ -2,7 +2,6 @@
 
 Chronological log of changes, derived from source diffs.
 For deployment and usage instructions, see `README.md`.
-For current open operational work, see `docs/PROJECT_STATUS.md`.
 
 ---
 

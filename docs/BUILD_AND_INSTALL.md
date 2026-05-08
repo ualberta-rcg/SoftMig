@@ -162,7 +162,27 @@ ls -l /var/lib/shared/libsoftmig.so
 nvidia-smi
 ```
 
-## 6) SLURM integration pointers
+## 6) Log rotation (recommended)
+
+SoftMig writes per-job logs to `/var/log/softmig/{jobid}.log`. On busy
+clusters these accumulate. Setting up logrotate is recommended:
+
+```bash
+# Example: /etc/logrotate.d/softmig
+/var/log/softmig/*.log {
+    daily
+    rotate 7
+    compress
+    missingok
+    notifempty
+}
+```
+
+For active jobs with large logs, a periodic trim (e.g., via cron hourly)
+that truncates files exceeding a size threshold prevents disk exhaustion
+during long-running jobs.
+
+## 7) SLURM integration pointers
 
 - Prolog example: `docs/examples/prolog_softmig.sh`
 - Epilog example: `docs/examples/epilog_softmig.sh`
