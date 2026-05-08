@@ -8,7 +8,7 @@
 
 ---
 
-## Description
+## 📖 Description
 
 **SoftMig** is a SLURM-integrated software GPU slicing system for shared NVIDIA GPU clusters. It lets administrators schedule ordinary NVIDIA GPUs in a MIG-like way using software-enforced memory limits, compute time-slicing, and SLURM prolog/epilog automation.
 
@@ -22,7 +22,22 @@ SoftMig is based on [HAMi-core](https://github.com/Project-HAMi/HAMi-core), adap
 
 SoftMig is intended for [Digital Research Alliance of Canada](https://alliancecan.ca/) / Compute Canada-style research clusters where GPU utilization, scheduling flexibility, and broad NVIDIA GPU compatibility matter more than hardware-level isolation.
 
-## Features
+<p align="center">
+<strong>SoftMig in action on the University of Alberta Vulcan cluster</strong>
+</p>
+
+<table align="center">
+<tr>
+<td align="center"><img src="./assets/softmig_pic1.png" alt="SoftMig 1/2 L40S slice on Vulcan" width="400" /></td>
+<td align="center"><img src="./assets/softmig_pic2.png" alt="SoftMig 1/4 L40S slice on Vulcan" width="400" /></td>
+</tr>
+<tr>
+<td align="center"><strong>1/2 L40S Slice</strong><br><code>nvidia-smi</code> reports ~24 GB visible</td>
+<td align="center"><strong>1/4 L40S Slice</strong><br><code>nvidia-smi</code> reports ~12 GB visible</td>
+</tr>
+</table>
+
+## ✨ Features
 
 - **GPU Memory Slicing** — enforce per-job GPU memory ceilings; when a job exceeds its limit, CUDA returns `CUDA_ERROR_OUT_OF_MEMORY`, just like running on a smaller physical GPU
 - **GPU Compute Slicing** — kernel launch throttling and SM time-slicing to limit GPU compute access per job
@@ -35,7 +50,7 @@ SoftMig is intended for [Digital Research Alliance of Canada](https://allianceca
 - **Optional `nvidia-smi` Filtering** — wrapper script hides other jobs' GPU processes by cgroup
 - **Framework Agnostic** — PyTorch, TensorFlow, JAX, MXNet, and any other CUDA workload
 
-## Quickstart
+## 🚀 Quickstart
 
 ### For SLURM Users
 
@@ -57,7 +72,7 @@ sbatch --gres=gpu:l40s:1 --time=2:00:00 job.sh
 - **Build, install, and update**: [docs/BUILD_AND_INSTALL.md](docs/BUILD_AND_INSTALL.md)
 - **SLURM integration** (prolog/epilog/job_submit): [docs/SLURM_INTEGRATION.md](docs/SLURM_INTEGRATION.md)
 
-## Documentation
+## 📚 Documentation
 
 | Document | Description |
 |----------|-------------|
@@ -68,7 +83,7 @@ sbatch --gres=gpu:l40s:1 --time=2:00:00 job.sh
 | [docs/TESTING.md](docs/TESTING.md) | Smoke tests and framework tests |
 | [CHANGES.md](CHANGES.md) | Release-level architecture and behavior changes |
 
-## References
+## 🔗 References
 
 - [University of Alberta Research Computing](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html)
 - [Alberta Machine Intelligence Institute (AMII)](https://www.amii.ca/)
