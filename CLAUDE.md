@@ -37,7 +37,6 @@ src/
     multiprocess_utilization_watcher.c  — SM throttle watchdog thread
     shrreg_tool.c       — CLI to inspect shared memory regions
   include/              — headers (nvml-subset.h is the NVML ABI definitions)
-ops/                    — logrotate, log trimming scripts
 docs/examples/          — prolog, epilog, install scripts for SLURM
 test/                   — test runners and CUDA probe binaries
 ```
