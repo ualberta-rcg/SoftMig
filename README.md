@@ -9,7 +9,9 @@
 
 > **Software MIG for any NVIDIA GPU — no hardware MIG required.**
 
-*Deployed on the [University of Alberta Vulcan cluster](https://ualberta-rcg.github.io/ragflow-wiki-data/), operated for [AMII](https://www.amii.ca/)* · **Maintained by:** Rahim Khoja ([khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)) and Karim Ali ([kali2@ualberta.ca](mailto:kali2@ualberta.ca))
+*Deployed on the [University of Alberta Vulcan cluster](https://ualberta-rcg.github.io/ragflow-wiki-data/), operated for [AMII](https://www.amii.ca/)* · 
+
+**Maintained by:** Rahim Khoja ([khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)) and Karim Ali ([kali2@ualberta.ca](mailto:kali2@ualberta.ca))
 
 ---
 
