@@ -70,32 +70,38 @@ sbatch --gres=gpu:l40s:1 --time=2:00:00 job.sh
 
 ## References
 
-- [Digital Research Alliance of Canada](https://alliancecan.ca/)
-- [Alliance Documentation](https://docs.alliancecan.ca/)
-- [PAICE (Pan-Canadian AI Compute Environment)](https://alliancecan.ca/en/services/advanced-research-computing/pan-canadian-ai-compute-environment-paice)
 - [University of Alberta Research Computing](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html)
 - [Alberta Machine Intelligence Institute (AMII)](https://www.amii.ca/)
+- [Digital Research Alliance of Canada](https://alliancecan.ca/)
 - [HAMi-core (upstream project)](https://github.com/Project-HAMi/HAMi-core)
 - [Vulcan Docs](https://ualberta-rcg.github.io/ragflow-wiki-data/)
 
 ---
 
-## Support
+## 🤝 Support
 
 Many Bothans died to bring us this information. This project is provided as-is, but reasonable questions may be answered based on my coffee intake or mood. ;)
 
-Feel free to open an [issue](https://github.com/ualberta-rcg/SoftMig/issues) or email **[khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)** or **[kali2@ualberta.ca](mailto:kali2@ualberta.ca)** for U of A related deployments.
+Feel free to open an issue or email **[khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)** or **[kali2@ualberta.ca](mailto:kali2@ualberta.ca)** for U of A related deployments.
 
----
+## 📜 License
 
-## License
+This project is released under the **MIT License** - one of the most permissive open-source licenses available.
 
-This project is released under the **MIT License** — see [LICENSE](./LICENSE) for details.
+**What this means:**
+- ✅ Use it for anything (personal, commercial, whatever)
+- ✅ Modify it however you want
+- ✅ Distribute it freely
+- ✅ Include it in proprietary software
 
----
+**The only requirement:** Keep the copyright notice somewhere in your project.
 
-## About University of Alberta Research Computing
+That's it! No other strings attached. The MIT License is trusted by major projects worldwide and removes virtually all legal barriers to using this code.
 
-The [Research Computing Group](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html) supports high-performance computing, data-intensive research, and advanced infrastructure for researchers at the University of Alberta and across Canada through the [Digital Research Alliance of Canada](https://alliancecan.ca/).
+**Full license text:** [MIT License](./LICENSE)
 
-The [Alberta Machine Intelligence Institute (AMII)](https://amii.ca/) is one of Canada's three national AI institutes and co-operates the Vulcan cluster for machine learning research workloads.
+## 🧠 About University of Alberta Research Computing
+
+The [Research Computing Group](https://www.ualberta.ca/en/information-services-and-technology/research-computing/index.html) supports high-performance computing, data-intensive research, and advanced infrastructure for researchers at the University of Alberta and across Canada.
+
+We help design and operate compute environments that power innovation — from AI training clusters to national research infrastructure.
