@@ -219,13 +219,334 @@ Added link to Vulcan cluster documentation site and support contact info.
 
 ---
 
-## Earlier Milestones
+## 2026-04 (pre-consolidation)
 
-### Foundational SoftMig Fork (from HAMi-core)
+### `e6410d4` — Enhance README with detailed system requirements and docs
 
-- Renamed project/library to SoftMig (`libsoftmig.so`)
-- Switched to file-based logging under `/var/log/softmig`
-- Added secure config-file-first model for SLURM jobs
-- Added passive mode when no config/environment is present
-- Added SLURM prolog/epilog integration examples
-- Standardized cache/lock paths to `SLURM_TMPDIR` for job isolation
+**Docs:** Comprehensive README update. Added system requirements, build
+instructions, runtime dependencies, logging setup, configuration file usage,
+environment variable priorities, update guidance, and nvidia-smi hook
+documentation.
+
+---
+
+### `5da8721` — Add nvidia-smi hook script
+
+**New:** Added `nvidia-smi-hook.sh` to filter nvidia-smi output by SLURM job
+cgroup, showing only processes belonging to the current job.
+
+---
+
+### `2610f5c` through `7061ee8` — NVML struct mismatch workarounds (4 commits)
+
+**Fix:** The NVML `nvmlProcessInfo_t` struct layout differed between CUDA
+toolkit headers and the installed driver (e.g., CUDA 12.2 headers vs driver
+570.x). PID and memory fields were at wrong offsets, causing garbage values.
+Implemented `extract_pid_safely()` to scan raw bytes for valid PIDs across
+multiple offsets with fast-path optimization. Implemented
+`extract_memory_safely()` to extract 64-bit memory values while avoiding
+overlaps with the PID field. Added throttled logging for mismatches.
+`7061ee8` introduced `extract_memory_safely`; `2610f5c` added validation
+to prevent memory values being mistaken for PIDs; `b5699fb` improved PID
+offset detection and throttled mismatch logging.
+
+---
+
+### `a381423`, `7f7bc14` — Bypass hooks for memory usage calculation
+
+**Changed:** Modified `nvmlDeviceGetComputeRunningProcesses` calls in memory
+usage functions to bypass SoftMig's own hooks, hitting the real NVML driver
+directly. This prevented filtered process lists from being used for limit
+enforcement. Added fallback for when `nvml_library_entry` is unavailable.
+Enhanced debug logging with counters for included/skipped/failed processes.
+
+---
+
+### `fd678d1` — Add process start time retrieval
+
+**New:** Added `proc_get_start_time()` to read process start time from
+`/proc/PID/stat`. Updated OOM killer to sort processes by PID (newest first)
+instead of memory usage, so the most recently started process is killed first.
+
+---
+
+### `21c886a`, `d1fc3ec` — Logging cleanup and throttling
+
+**Changed:** Moved frequent debug logs (dlsym, NVML hooks, graph wrappers)
+to file-only output. Implemented fast-path PID validation in
+`extract_pid_safely()` with fallback scanning only when the standard field
+fails. Added throttled mismatch logging (every 100th occurrence). Adjusted
+utilization watcher interval to approximately 5 seconds.
+
+---
+
+### `3b2c1b9`, `a21d0d9` — Thread-safe logging fixes
+
+**Fix:** `basename()` is not thread-safe (may modify its argument). Replaced
+with a local buffer copy. Fixed `va_list` usage in console logging to use
+`va_copy` so the argument list isn't consumed by file logging before console
+logging runs.
+
+---
+
+### `3f24479` — Prevent segfault in NVML library loading
+
+**Fix:** `load_nvml_libraries()` could proceed with NULL function pointers
+when `real_dlsym` wasn't found, causing segfaults. Added early returns after
+all failure checks.
+
+---
+
+### `fe82b13`, `aeaca14`, `8e88575` — NVML error handling cleanup
+
+**Changed:** Added error logging to `NVML_OVERRIDE_CALL` macros when function
+symbols aren't found, then removed the error-level logging (too noisy for
+missing optional symbols). Cleaned up commented-out code and unused includes.
+
+---
+
+### `89753ea` — Rename log level env var, add config caching
+
+**Changed:** Renamed `LIBCUDA_LOG_LEVEL` to `SOFTMIG_LOG_LEVEL`. Added config
+value caching in `config_file.c` so the config file isn't re-read on every
+limit lookup.
+
+---
+
+### `8a1088d` — Safe PID extraction for NVML struct mismatches
+
+**Fix:** Implemented `extract_pid_safely()` to scan raw struct bytes for valid
+PIDs when the header field is wrong. Covers the case where CUDA toolkit
+headers and the installed driver disagree on `nvmlProcessInfo_t` layout.
+Added detailed logging for debugging mismatches across `process_utils.c`,
+`multiprocess_memory_limit.c`, and `nvml_entry.c`.
+
+---
+
+### `5076f79`, `ca1517b`, `cacb8da` — NVML version field initialization
+
+**Fix:** Added manual `infos[i].version = nvmlProcessInfo_v2` initialization
+before every NVML process query across `nvml_entry.c`, `utils.c`,
+`hook.c`, and `multiprocess_utilization_watcher.c`. Attempted v1 fallback
+when v2 returned `NVML_ERROR_INVALID_ARGUMENT`. This was a workaround for
+struct version mismatches between CUDA toolkit headers and the driver.
+
+---
+
+### `c4c55f0`, `ab7c19d` — Logging refinements
+
+**Changed:** Removed verbose helper function logs. Added warnings for
+insufficient NVML buffer sizes. Enhanced debug logging with raw NVML response
+data for troubleshooting.
+
+---
+
+### `dd2aafd` — Gradual OOM killer
+
+**New:** Implemented gradual OOM killer that targets processes by GPU memory
+usage. Added `log_oom_to_syslog()` for audit trail. Integrated memory
+monitoring into the utilization watcher for proactive OOM detection.
+
+---
+
+### `71904f4` through `aade736` — Active OOM killer with cgroup/UID filtering (7 commits)
+
+**New:** Implemented `active_oom_killer` targeting processes by cgroup/UID
+membership for job isolation. Disabled OOM handling for root. Iteratively
+refined to bypass NVML hooks for unfiltered process retrieval, add UID
+verification in addition to cgroup checks, and improve logging with memory
+usage details. `f2b7dc6` introduced the killer; `1d1bca9`/`c12c60d` fixed
+type compatibility for NVML v1/v2 structs; `d9f2b06` standardized NVML call
+pattern; `b466777` added UID verification; `71904f4` bypassed hooks for
+unfiltered access; `aade736` added comprehensive logging.
+
+---
+
+### `3ce21c6` — Include all cgroup/UID processes in memory usage
+
+**Changed:** Modified `nvml_get_device_memory_usage` to include all processes
+in the cgroup/UID regardless of whether they're registered in the shared
+region. Previously, unregistered processes were invisible to OOM checks.
+
+---
+
+### `5535937`, `6f56c61` — PID detection robustness
+
+**Fix:** Added PID validation (range checks, zero/garbage detection) in
+`mergepid` and `set_task_pid`. Initialize PID arrays to zero to avoid garbage
+values. Replaced complex PID fallback logic with direct `getpid()` call.
+
+---
+
+### `0e6b26c`, `6cafa3b` — NVML header conflict resolution
+
+**Fix:** System `<nvml.h>` and SoftMig's `nvml-subset.h` defined conflicting
+types. Reordered includes so `nvml-subset.h` is included first with
+`NVML_NO_UNVERSIONED_FUNC_DEFS` to suppress system definitions. Added
+forward declaration of `nvmlReturn_t` in `nvml_override.h`. Added
+compatibility alias for `nvmlProcessInfo_v1_t`.
+
+---
+
+### `a72aa02`, `d73e45d` — Improved PID detection in cgroup environments
+
+**Changed:** Enhanced `set_task_pid` to prioritize finding the current process
+PID in the filtered list before falling back to the differencing method.
+Improved reliability in SLURM cgroup setups. Changed verbose log levels from
+INFO to DEBUG.
+
+---
+
+### `7f178ea`, `7f74836` — NVML v2 filtering delegation
+
+**Changed:** Updated `nvmlDeviceGetComputeRunningProcesses` and
+`nvmlDeviceGetGraphicsRunningProcesses` to delegate to v2 variants with
+built-in cgroup/UID filtering. Updated `nvml_get_device_memory_usage` to
+check cgroup membership before falling back to UID checks.
+
+---
+
+### `b76f0ea` — Merge PR #1 (cgroup-based VRAM filtering)
+
+Merged cgroup filtering branch from Karim.
+
+---
+
+### `2af4b41`, `9ccfea2` — Cgroup-based process filtering
+
+**New:** Implemented `proc_belongs_to_current_cgroup_session()` to filter
+processes by SLURM job cgroup. Parses `/proc/<pid>/cgroup` for both cgroups
+v1 and v2, extracts job IDs from paths like `slurm/uid_*/job_*/`. Updated
+memory usage functions to use cgroup filtering with UID fallback. `9ccfea2`
+fixed build errors (dlvsym NULL→empty string, missing forward declarations).
+
+---
+
+### `df191c2` — Summed memory usage calculation
+
+**New:** Added `get_summed_device_memory_usage_from_nvml()` to calculate total
+CUDA device memory usage for the current user with 9MB minimum + 5% overhead
+per process. Filters by UID with enhanced logging.
+
+---
+
+### `76a2e70` through `9943b93` — Memory tracking accuracy (8 commits)
+
+**Changed:** Iteratively improved memory tracking accuracy. Reduced per-process
+minimum from 64MB to 9MB and added 5% overhead. Added lock-free variants
+(`get_gpu_memory_usage_nolock`) for OOM checks. Removed fallbacks to tracked
+usage — all memory reporting now uses summed NVML calculations exclusively.
+Updated `cuMemGetInfo` and `cuMemGetInfo_v2` to use NVML-summed values.
+Fixed processes being skipped when UID couldn't be read (previously blocked
+on shared region locks).
+
+---
+
+### `5e73ca9`, `1251f42` — Process UID filtering
+
+**New:** Implemented `proc_get_uid()` to retrieve process UID from
+`/proc/<pid>/status`. Updated memory usage functions to filter processes by
+current user's UID so only same-user processes are counted. Added
+`proc_alive()`. Separated declarations into `process_utils.h` and
+implementation into `process_utils.c`.
+
+---
+
+### `23f3e8e` — Shared region locking for allocations
+
+**Fix:** Added `lock_shrreg`/`unlock_shrreg` to serialize shared region access
+during `add_chunk` and `add_chunk_only`, preventing race conditions between
+concurrent processes updating GPU memory usage counters.
+
+---
+
+### `47fad1e` — Minimum memory allocation per process
+
+**Changed:** Added 64MB minimum per-process memory count in NVML usage
+calculations to improve accuracy for processes with low reported usage.
+Later reduced to 9MB in `9943b93`.
+
+---
+
+### `281f3dd`, `fcc45c1` — Config cleanup delegation to SLURM epilog
+
+**Changed:** Removed `cleanup_config_file()` function and its exit handler
+call. Config file cleanup is now the SLURM epilog script's responsibility,
+streamlining exit handling.
+
+---
+
+### `24963c8` through `d108979` — NVML integration attempt and revert
+
+**New → Reverted:** Extended `get_current_device_memory_usage` to use NVML
+process summing. Replaced direct NVML calls with `NVML_FIND_ENTRY` dynamic
+symbol resolution. Added `nvml_symbols_available` checks with weak stubs.
+Then reverted all NVML integration changes due to issues, returning to direct
+NVML API calls and tracked usage only.
+
+---
+
+### `ba8d788` — NVML process memory summing
+
+**New:** Implemented `sum_process_memory_from_nvml()` to query NVML for
+running process memory instead of relying solely on tracked allocations.
+Added 2MB per-process overhead. Updated `nvmlDeviceGetMemoryInfo` to use
+NVML-summed values with tracked usage fallback.
+
+---
+
+### `541c95f`, `6682a80` — Logging format and type fixes
+
+**Fix:** Changed `cuMemMap` and `cuMemCreate` logging from `%lld` to `%zu`
+for `size_t` parameters. Increased device index name buffer from 8 to 16
+bytes. Added forward declaration for `is_softmig_configured`. Standardized
+`nvmlProcessInfo_v1_t` to `nvmlProcessInfo_t`.
+
+---
+
+### `6d15690` — Log file path safety and EOF handling
+
+**Fix:** Replaced `strncpy` with safe memcpy and null-termination in
+`get_log_file_path`. Added NULL check for `fgets` return value in
+`load_env_from_file`. Fixed missing `LOG_WARN` call.
+
+---
+
+### `a9aad77` — Remove redundant NVML declarations
+
+**Cleanup:** Removed duplicate NVML function declarations from
+`nvml_override.h` that conflicted with system `nvml.h`. Updated `hook.c` to
+include `nvml-subset.h` first with `NVML_NO_UNVERSIONED_FUNC_DEFS`.
+
+---
+
+### `d7b19c8` — Reduce logging verbosity
+
+**Changed:** Removed frequent debug logs from dlsym, NVML library loading,
+`nvmlDeviceGetMemoryInfo`, and `nvmlDeviceGetHandleByIndex` to improve
+performance. Modified `test_softmig.sh` to conditionally load CUDA module
+with CVMFS fallback.
+
+---
+
+### `965504b` — Initial SoftMig codebase
+
+**New:** Forked from HAMi-core. Renamed library from `libvgpu.so` to
+`libsoftmig.so`. Updated all logging to file-only output under
+`/var/log/softmig`. Implemented SLURM-aware cache and config file handling.
+Added CUDA/NVML hooks, multiprocess memory management, allocator, SLURM
+prolog/epilog integration scripts, and test suite.
+
+---
+
+### `52a563e` — Initial commit
+
+Empty repository initialization.
+
+---
+
+### `510f9c2`, `8c0b421`, `6840285` — Cleanup commits
+
+Removed unused documentation files (`UNUSED_CODE_REPORT.md`,
+`GPU_LIMITER_EXPLANATION.md`), unused functions/macros from allocator and
+memory management, commented-out code, and unnecessary variable declarations.
