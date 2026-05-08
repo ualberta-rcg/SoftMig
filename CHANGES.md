@@ -7,16 +7,17 @@ For deployment and usage instructions, see `README.md`.
 
 ## 2026-05-08
 
-### README — Add demo images and section icons
+### README — Add demo images, badges, hero line, and section icons
 
 Added `softmig_pic1.png` and `softmig_pic2.png` showing SoftMig running on the
 University of Alberta Vulcan cluster: `nvidia-smi` output for a 1/2 L40S slice
 (~24 GB visible) and a 1/4 L40S slice (~12 GB visible). Images displayed
 side-by-side after the Description section with captions.
 
-Added emoji icons to all section headers (📖 Description, ✨ Features, 🚀
-Quickstart, 📚 Documentation, 🔗 References) to match the existing 🤝 Support,
-📜 License, and 🧠 About section styles.
+Added CUDA 12+, CUDA 13, and NVIDIA GPU compatibility badges. Added hero
+tagline ("Software MIG for any NVIDIA GPU — no hardware MIG required.") and
+"Deployed on the University of Alberta Vulcan cluster" line. Added emoji icons
+to all section headers.
 
 ---
 

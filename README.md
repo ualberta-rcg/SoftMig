@@ -3,8 +3,13 @@
 # University of Alberta - SoftMig
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
+[![CUDA 12+](https://img.shields.io/badge/CUDA-12%2B-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![CUDA 13](https://img.shields.io/badge/CUDA-13-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
+[![NVIDIA GPU](https://img.shields.io/badge/GPU-L40S%20%7C%20A40%20%7C%20V100%20%7C%20RTX-76B900.svg)](https://www.nvidia.com/)
 
-**Maintained by:** Rahim Khoja ([khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)) and Karim Ali ([kali2@ualberta.ca](mailto:kali2@ualberta.ca))
+> **Software MIG for any NVIDIA GPU — no hardware MIG required.**
+
+*Deployed on the [University of Alberta Vulcan cluster](https://ualberta-rcg.github.io/ragflow-wiki-data/)* · **Maintained by:** Rahim Khoja ([khoja1@ualberta.ca](mailto:khoja1@ualberta.ca)) and Karim Ali ([kali2@ualberta.ca](mailto:kali2@ualberta.ca))
 
 ---
 
