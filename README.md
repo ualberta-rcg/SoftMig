@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CUDA 12+](https://img.shields.io/badge/CUDA-12%2B-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![CUDA 13](https://img.shields.io/badge/CUDA-13-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
-[![NVIDIA GPU](https://img.shields.io/badge/GPU-L40S%20%7C%20A40%20%7C%20V100%20%7C%20RTX-76B900.svg)](https://www.nvidia.com/)
+[![NVIDIA GPU](https://img.shields.io/badge/GPU-L%20%7C%20A%20%7C%20V%20%7C%20RTX%20Series-76B900.svg)](https://www.nvidia.com/)
 
 > **Software MIG for any NVIDIA GPU — no hardware MIG required.**
 

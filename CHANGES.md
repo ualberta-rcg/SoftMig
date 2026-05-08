@@ -17,6 +17,7 @@ side-by-side after the Description section with captions.
 Added CUDA 12+, CUDA 13, and NVIDIA GPU compatibility badges. Added hero
 tagline ("Software MIG for any NVIDIA GPU — no hardware MIG required.") and
 "Deployed on the University of Alberta Vulcan cluster (operated for AMII)" line.
+Updated GPU compatibility badge from specific models to series names (L | A | V | RTX).
 to all section headers.
 
 ---
