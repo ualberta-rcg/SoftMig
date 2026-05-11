@@ -1,6 +1,6 @@
 <img src="./assets/ua_logo_green_rgb.png" alt="University of Alberta Logo" width="50%" />
 
-# University of Alberta - SoftMig
+# SoftMig
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 [![CUDA 12+](https://img.shields.io/badge/CUDA-12%2B-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
