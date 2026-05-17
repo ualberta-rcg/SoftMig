@@ -339,8 +339,9 @@ void nvml_postInit() {
  * Sum GPU memory used by processes belonging to the current cgroup/UID on a device.
  *
  * Bypasses the hook to get ALL processes, then filters by cgroup session or UID.
- * Applies a 9 MB minimum and 5% overhead per process. Returns 0 if the NVML
- * query fails (caller should fall back to tracked usage).
+ * Reports the raw NVML usedGpuMemory per process with no per-process inflation;
+ * processes that NVML reports as 0/unavailable add nothing. Returns 0 if the
+ * NVML query fails (caller should fall back to tracked usage).
  */
 uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
     nvmlProcessInfo_t infos[SHARED_REGION_MAX_PROCESS_NUM];
@@ -349,8 +350,6 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
         device, SHARED_REGION_MAX_PROCESS_NUM, infos);
     
     uint64_t total_usage = 0;
-    const uint64_t MIN_PROCESS_MEMORY = 9 * 1024 * 1024;
-    const double PROCESS_OVERHEAD_PERCENT = 0.05;
     const uint64_t NVML_VALUE_NOT_AVAILABLE_ULL = 0xFFFFFFFFFFFFFFFFULL;
     
     uid_t current_uid = getuid();
@@ -394,14 +393,9 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
         uint64_t process_mem = infos[i].usedGpuMemory;
         
         if (process_mem != NVML_VALUE_NOT_AVAILABLE_ULL && process_mem > 0) {
-            // Add 5% overhead, then ensure minimum
-            uint64_t process_mem_with_overhead = (uint64_t)(process_mem * (1.0 + PROCESS_OVERHEAD_PERCENT));
-            uint64_t process_mem_counted = (process_mem_with_overhead < MIN_PROCESS_MEMORY) ? MIN_PROCESS_MEMORY : process_mem_with_overhead;
-            total_usage += process_mem_counted;
-        } else {
-            // Even if NVML reports 0 or unavailable, count minimum for the process
-            total_usage += MIN_PROCESS_MEMORY;
+            total_usage += process_mem;
         }
+        // If NVML reports 0 or unavailable, contribute nothing for this process.
     }
     
     return total_usage;
@@ -446,9 +440,9 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
         return NVML_SUCCESS;
     }
     
-    // Always use calculated sum from NVML (with 9MB minimum + 5% overhead and UID filtering)
-    // This gives us the actual current usage as seen by NVML, properly filtered and adjusted
-    // No fallback - always use the summed calculation to ensure consistency
+    // Always use calculated sum from NVML (cgroup/UID-filtered, raw per-process values).
+    // This gives us the actual current usage as seen by NVML, properly filtered.
+    // No fallback - always use the summed calculation to ensure consistency.
     uint64_t usage = sum_process_memory_from_nvml(device);
     
     // If NVML query failed, usage will be 0, which is fine - it means no processes are using memory

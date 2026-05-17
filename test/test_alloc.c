@@ -11,7 +11,6 @@ size_t usage = 0;
 
 int test(size_t bytes) {
     CUdeviceptr dptr;
-    uint64_t t_size;
     CHECK_DRV_API(cuMemAlloc(&dptr, bytes));
     CHECK_NVML_API(get_current_memory_usage(&usage));
     CHECK_DRV_API(cuMemFree(dptr));
@@ -72,7 +71,9 @@ int main() {
     CHECK_DRV_API(cuDeviceGet(&device, TEST_DEVICE_ID));
 
     CUcontext ctx;
-    CHECK_DRV_API(cuCtxCreate(&ctx, 0, device));
+    // Use cuCtxCreate_v2 explicitly to build on both CUDA 12 and CUDA 13
+    // (CUDA 13 #defines cuCtxCreate to cuCtxCreate_v4 with a different signature).
+    CHECK_DRV_API(cuCtxCreate_v2(&ctx, 0, device));
     CHECK_NVML_API(get_current_memory_usage(&usage));
 
     CHECK_ALLOC_TEST(alloc_trim_test());

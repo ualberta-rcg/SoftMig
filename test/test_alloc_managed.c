@@ -27,7 +27,7 @@ int main() {
     CHECK_DRV_API(cuDeviceGet(&device, TEST_DEVICE_ID));
 
     CUcontext ctx;
-    CHECK_DRV_API(cuCtxCreate(&ctx, 0, device));
+    CHECK_DRV_API(cuCtxCreate_v2(&ctx, 0, device));
     CHECK_NVML_API(get_current_memory_usage(&usage));
 
     size_t arr[84] = {};

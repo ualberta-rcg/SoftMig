@@ -5,8 +5,9 @@
  * Implements the rate_limiter that throttles CUDA kernel launches to enforce
  * SM utilization limits. A background pthread polls NVML every ~120 ms for
  * per-process SM utilization and adjusts the token pool accordingly. Every
- * ~5 seconds it also checks memory usage against limits and triggers the
- * gradual OOM killer if needed.
+ * ~5 seconds it also checks memory usage against limits, logs OOM events to
+ * syslog, and (only when SOFTMIG_ENABLE_OOM_KILLER is set) triggers the
+ * gradual OOM killer.
  */
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -37,6 +38,10 @@
 #include "include/log_utils.h"
 #include "include/nvml_override.h"
 #include "include/process_utils.h"
+
+// Defined in multiprocess_memory_limit.c. 0 = OOM killer disabled (default),
+// 1 = legacy active/gradual OOM killer enabled via SOFTMIG_ENABLE_OOM_KILLER.
+extern int enable_active_oom_killer;
 
 static int g_sm_num;
 static int g_max_thread_per_sm;
@@ -344,9 +349,14 @@ void* utilization_watcher() {
                             syslog(LOG_ERR, "%s", syslog_msg);
                             closelog();
                             LOG_ERROR("OOM syslog: %s", syslog_msg);
-                            
-                            // Trigger gradual OOM killer
-                            gradual_oom_killer(cuda_dev);
+
+                            // Trigger gradual OOM killer only when the legacy
+                            // in-library OOM killer is explicitly enabled.
+                            // Otherwise leave enforcement to the per-allocation
+                            // path (cuMemAlloc -> CUDA_ERROR_OUT_OF_MEMORY).
+                            if (enable_active_oom_killer) {
+                                gradual_oom_killer(cuda_dev);
+                            }
                         } else {
                             // Log memory usage as INFO (useful for users) - shows on console at level >= 3
                             LOG_INFO("utilization_watcher[5s]: Device %d (CUDA %d) - memory OK: usage=%.2f GB limit=%.2f GB", 

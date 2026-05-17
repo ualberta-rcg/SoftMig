@@ -57,10 +57,9 @@ CUresult cuDeviceGetPCIBusId(char *pciBusId, int len, CUdevice dev) {
     return res;
 }
 
-CUresult cuDeviceGetUuid(CUuuid* uuid,CUdevice dev) {
-    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetUuid,uuid,dev);
-    return res;
-}
+// cuDeviceGetUuid is a pure pass-through with no SoftMig-specific logic, so
+// we deliberately do NOT hook it. dlsym will resolve it directly from libcuda
+// for both CUDA 12 (cuDeviceGetUuid) and CUDA 13 (cuDeviceGetUuid_v2).
 
 CUresult cuDeviceGetDefaultMemPool(CUmemoryPool *pool_out, CUdevice dev) {
     return CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceGetDefaultMemPool,

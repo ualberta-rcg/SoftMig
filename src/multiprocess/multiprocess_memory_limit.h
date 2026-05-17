@@ -152,7 +152,7 @@ uint64_t get_current_device_memory_usage(const int dev);
 size_t get_gpu_memory_usage(const int dev);
 // Get memory usage without locking (caller must hold lock_shrreg)
 size_t get_gpu_memory_usage_nolock(const int dev);
-// Get summed memory usage from NVML for a CUDA device (with 9MB min + 5% overhead + UID filtering)
+// Get summed memory usage from NVML for a CUDA device (cgroup/UID filtered, raw per-process values)
 uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev);
 
 // Priority-related

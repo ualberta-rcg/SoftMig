@@ -5,6 +5,82 @@ For deployment and usage instructions, see `README.md`.
 
 ---
 
+## 2026-05-17
+
+### Fix latent cuMemcpy2D / cuMemcpy2DUnaligned dispatch-table swap
+
+`src/include/libcuda_hook.h` declared the enum order as
+`cuMemcpy2DUnaligned_v2` then `cuMemcpy2D_v2`, but `src/cuda/hook.c` listed the
+matching `cuda_library_entry` slots in the opposite order. The result was that
+calls to `cuMemcpy2D_v2` would resolve through the dispatch table to the
+`cuMemcpy2DUnaligned_v2` symbol in libcuda, and vice versa.
+
+Swapped the two entries in `src/cuda/hook.c` to match the enum order. Also
+fixed `cuMemcpy2D_v2`'s wrapper in `src/cuda/memory.c` to call
+`CUDA_OVERRIDE_CALL(..., cuMemcpy2D_v2, ...)` explicitly instead of relying on
+CUDA's `#define cuMemcpy2D cuMemcpy2D_v2` macro, for consistency with the
+other `cuMemcpy*_v2` wrappers and so that no CUDA-header version rename
+silently re-breaks this dispatch.
+
+### Test cleanup — remove unused `t_size` locals
+
+Removed unused `t_size` variables in `test/test_alloc.c`, `test/test_alloc_hold.c`,
+and `test/test_create_array.c`. No behavior change, just silences `-Wunused`.
+
+### CUDA 13 compatibility — drop pass-through hooks with conflicting signatures
+
+CUDA 13 renames several driver entry points to new `_v2/_v4` versions whose
+`cuda.h` macros redefine the old names to signatures incompatible with our
+existing wrappers (e.g. `cuCtxCreate` → `cuCtxCreate_v4(4 args)`,
+`cuGraphGetEdges` → `cuGraphGetEdges_v2(5 args)`,
+`cuMemAdvise` → `cuMemAdvise_v2`,
+`cuMemPrefetchAsync` → `cuMemPrefetchAsync_v2`,
+`cuDeviceGetUuid` → `cuDeviceGetUuid_v2`,
+and several `cuGraph*Dependencies*` variants).
+
+All of these were **pure pass-through wrappers** with no SoftMig-specific
+logic. Hooking them was never necessary — `dlsym` falls through to libcuda
+when we don't override. Removed the wrappers in `src/cuda/context.c`,
+`src/cuda/memory.c`, `src/cuda/device.c`, `src/cuda/graph.c` and the matching
+entries in `src/cuda/hook.c`, `src/include/libcuda_hook.h`, and
+`src/libsoftmig.c`. Only `cuGraphLaunch` remains hooked from `graph.c`
+(needed for SM rate-limiting).
+
+Updated `test/test_alloc*.c` and `test/test_create_*.c` to call
+`cuCtxCreate_v2` explicitly so the legacy 3-arg signature compiles on
+both CUDA 12 and CUDA 13 (where bare `cuCtxCreate` is `cuCtxCreate_v4`).
+
+Verified: clean build against both `cuda/12.6` and `cuda/13.2`. No runtime
+behavior change on CUDA 12 — the removed wrappers were already no-ops.
+
+### Restore native CUDA OOM behavior and full memory budget
+
+**Changed: removed the per-process 5% overhead and 9 MB floor in
+`sum_process_memory_from_nvml()`** (`src/nvml/hook.c`). Memory usage is now
+the raw NVML `usedGpuMemory` summed across processes in the current
+cgroup/UID. The previous inflation was a workaround for older NVML
+under-reporting; on CUDA 12+ it just shaved ~5% off the configured slice
+limit and added a fixed 9 MB tax per process. Comments in `allocator.c`,
+`cuda/memory.c`, and `multiprocess_memory_limit.{c,h}` updated to match.
+
+**Changed: in-library OOM killer disabled by default.** Previously
+`enable_active_oom_killer` was hardcoded on, which meant `cuMemAlloc()`
+calls over the limit triggered `active_oom_killer()` and `SIGKILL`-ed every
+process in the calling cgroup/UID — including the caller. The natural CUDA
+path already returns `CUDA_ERROR_OUT_OF_MEMORY` from `add_chunk()` when the
+per-job limit would be exceeded, so on a SoftMig-sliced GPU `cudaMalloc`
+now behaves like a real GPU: returns `cudaErrorMemoryAllocation` and the
+process keeps running. The background utilization watcher still logs OOM
+events to syslog but no longer invokes `gradual_oom_killer()` by default.
+
+**New: `SOFTMIG_ENABLE_OOM_KILLER` opt-in.** Set the env var to `1`/`true`
+(or add `SOFTMIG_ENABLE_OOM_KILLER=1` to the per-job config file
+`/var/run/softmig/{jobid}.conf`) to restore the legacy active + gradual
+kill defense. Implemented as `get_softmig_oom_killer_enabled()` in
+`src/multiprocess/config_file.c`.
+
+---
+
 ## 2026-05-08
 
 ### README — Add demo images, badges, hero line, and section icons

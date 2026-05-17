@@ -57,17 +57,10 @@ CUresult cuCtxGetDevice(CUdevice* device) {
     return res;
 }
 
-CUresult cuCtxCreate_v2 ( CUcontext* pctx, unsigned int  flags, CUdevice dev ){
-    LOG_DEBUG("into cuCtxCreate pctx=%p flags=%d dev=%d",pctx,flags,dev);
-    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxCreate_v2,pctx,flags,dev);
-    return res;
-}
-
-CUresult cuCtxCreate_v3 ( CUcontext* pctx, CUexecAffinityParam* paramsArray, int  numParams, unsigned int  flags, CUdevice dev ){
-    LOG_DEBUG("into cuCtxCreate_v3 pctx=%p paramsArray=%p numParams=%d flags=%d dev=%d",pctx,paramsArray,numParams,flags,dev);
-    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxCreate_v3,pctx,paramsArray,numParams,flags,dev);
-    return res;
-}
+// cuCtxCreate_v2/v3 are pure pass-throughs (just LOG_DEBUG, no SoftMig logic).
+// We deliberately do NOT hook them. dlsym will resolve them directly from
+// libcuda for CUDA 12 (v2/v3) and CUDA 13 (v4 with different signature).
+// Primary context tracking still works via cuDevicePrimaryCtxRetain/Release.
 
 CUresult cuCtxDestroy_v2 ( CUcontext ctx ){
     LOG_DEBUG("into cuCtxDestroy_v2 ctx=%p",ctx);

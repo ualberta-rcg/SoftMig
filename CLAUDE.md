@@ -5,7 +5,8 @@
 SoftMig is a SLURM-integrated software GPU slicing layer for shared NVIDIA GPU
 clusters. It intercepts CUDA and NVML calls via `LD_PRELOAD` to enforce per-job
 memory limits and SM compute throttling. Based on HAMi-core, adapted for
-Alliance/Compute Canada HPC environments. CUDA 12+ only.
+Alliance/Compute Canada HPC environments. Builds against CUDA 12 and CUDA 13
+headers (the same `libsoftmig.so` runs on either driver).
 
 ## Build
 
@@ -58,12 +59,18 @@ test/                   — test runners and CUDA probe binaries
 ## Key data flow
 
 - **Memory enforcement**: `cuMemAlloc` → allocator checks summed NVML usage
-  against limit → OOM killer if exceeded. NVML usage is summed per-process
-  using cgroup/UID filtering, with a 1-second TTL cache.
+  against limit → returns `CUDA_ERROR_OUT_OF_MEMORY` if exceeded (matches
+  real-GPU behavior). NVML usage is summed per-process from raw
+  `usedGpuMemory` values using cgroup/UID filtering, with a 1-second TTL
+  cache; no per-process inflation is applied.
 - **Process isolation**: `nvmlDeviceGetComputeRunningProcesses` hooks filter
   the process list by cgroup session (SLURM job) or UID fallback.
 - **SM throttling**: utilization watcher thread sleeps kernel launches when
-  a job exceeds its SM utilization quota.
+  a job exceeds its SM utilization quota. It also logs OOM events to syslog.
+- **Legacy OOM killer (opt-in)**: `active_oom_killer()` (per-allocation) and
+  `gradual_oom_killer()` (watcher) `SIGKILL` processes in the calling
+  cgroup/UID. Disabled by default; set `SOFTMIG_ENABLE_OOM_KILLER=1` in the
+  env or per-job config file to enable.
 
 ## Key constraints
 
@@ -74,6 +81,14 @@ test/                   — test runners and CUDA probe binaries
   `{jobid}.conf` since `SLURM_ARRAY_TASK_ID` may not be set in prolog.
 - `nvmlProcessInfo_t` is defined locally in `nvml-subset.h` to match the
   driver ABI — do not include system `<nvml.h>` for struct definitions.
+- CUDA 13 renames many entry points via `cuda.h` macros (e.g. `cuCtxCreate`
+  → `cuCtxCreate_v4` with a 4-arg signature, `cuGraphGetEdges` → `_v2`,
+  `cuMemAdvise` → `_v2`, `cuMemPrefetchAsync` → `_v2`, `cuDeviceGetUuid`
+  → `_v2`). We only hook entry points that contain SoftMig logic. Pure
+  pass-throughs are deliberately **not** in the dispatch table — `dlsym`
+  falls through to libcuda. This avoids signature conflicts when building
+  against CUDA 13. Tests that call the legacy 3-arg `cuCtxCreate` must use
+  `cuCtxCreate_v2` explicitly.
 
 ## Testing
 

@@ -450,10 +450,10 @@ CUresult cuMemsetD8Async ( CUdeviceptr dstDevice, unsigned char  uc, size_t N, C
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD8Async,dstDevice,uc,N,hStream);
 }
 
-CUresult cuMemAdvise( CUdeviceptr devPtr, size_t count, CUmem_advise advice, CUdevice device ){
-    ENSURE_RUNNING();
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAdvise,devPtr,count,advice,device);
-}
+// cuMemAdvise is a pure pass-through with no SoftMig-specific logic, so
+// we deliberately do NOT hook it. dlsym will resolve it directly from libcuda
+// for both CUDA 12 (cuMemAdvise) and CUDA 13 (cuMemAdvise_v2 with a different
+// signature).
 
 #ifdef HOOK_MEMINFO_ENABLE
 #undef cuMemGetInfo
@@ -466,9 +466,9 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo(size_t* free, size_t* total) {
     unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
     size_t limit = get_current_device_memory_limit(nvml_dev_idx);
     
-    // Always use summed NVML usage (with 9MB minimum + 5% overhead and UID filtering)
-    // This ensures all processes see the same consistent usage value
-    // No fallback - always use the summed calculation
+    // Always use summed NVML usage (cgroup/UID-filtered, raw per-process values).
+    // This ensures all processes see the same consistent usage value.
+    // No fallback - always use the summed calculation.
     uint64_t usage = get_summed_device_memory_usage_from_nvml(dev);
     
     // If NVML query failed, usage will be 0, which is fine - it means no processes are using memory
@@ -515,9 +515,9 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo_v2(size_t* free, size_t* total) {
     unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
     size_t limit = get_current_device_memory_limit(nvml_dev_idx);
     
-    // Always use summed NVML usage (with 9MB minimum + 5% overhead and UID filtering)
-    // This ensures all processes see the same consistent usage value
-    // No fallback - always use the summed calculation
+    // Always use summed NVML usage (cgroup/UID-filtered, raw per-process values).
+    // This ensures all processes see the same consistent usage value.
+    // No fallback - always use the summed calculation.
     uint64_t usage = get_summed_device_memory_usage_from_nvml(dev);
     
     // If NVML query failed, usage will be 0, which is fine - it means no processes are using memory
@@ -703,7 +703,7 @@ CUresult cuMemPoolImportPointer(CUdeviceptr *ptr_out, CUmemoryPool pool, CUmemPo
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemPoolImportPointer,ptr_out,pool,shareData);
 }
 CUresult cuMemcpy2D_v2(const CUDA_MEMCPY2D *pCopy) {
-    return CUDA_OVERRIDE_CALL(cuda_library_entry, cuMemcpy2D, pCopy);
+    return CUDA_OVERRIDE_CALL(cuda_library_entry, cuMemcpy2D_v2, pCopy);
 }
 CUresult cuMemcpy2DUnaligned_v2(const CUDA_MEMCPY2D *pCopy) {
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy2DUnaligned_v2,pCopy);
@@ -727,9 +727,10 @@ CUresult cuMemcpy3DPeerAsync(const CUDA_MEMCPY3D_PEER *pCopy, CUstream hStream) 
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpy3DPeerAsync,pCopy,hStream);
 }
 
-CUresult cuMemPrefetchAsync(CUdeviceptr devPtr, size_t count, CUdevice dstDevice, CUstream hStream) {
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemPrefetchAsync,devPtr,count,dstDevice,hStream);
-}
+// cuMemPrefetchAsync is a pure pass-through with no SoftMig-specific logic, so
+// we deliberately do NOT hook it. dlsym will resolve it directly from libcuda
+// for both CUDA 12 (cuMemPrefetchAsync) and CUDA 13 (cuMemPrefetchAsync_v2 with
+// a different signature).
 
 CUresult cuMemRangeGetAttribute(void *data, size_t dataSize, CUmem_range_attribute attribute, CUdeviceptr devPtr, size_t count) {
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemRangeGetAttribute,data,dataSize,attribute,devPtr,count);

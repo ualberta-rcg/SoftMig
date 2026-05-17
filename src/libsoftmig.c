@@ -180,8 +180,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuInit);
     DLSYM_HOOK_FUNC(cuGetProcAddress);
     DLSYM_HOOK_FUNC(cuGetProcAddress_v2);
-    DLSYM_HOOK_FUNC(cuCtxCreate_v2);
-    DLSYM_HOOK_FUNC(cuCtxCreate_v3);
     DLSYM_HOOK_FUNC(cuDevicePrimaryCtxGetState);
     DLSYM_HOOK_FUNC(cuDevicePrimaryCtxRetain);
     DLSYM_HOOK_FUNC(cuDevicePrimaryCtxSetFlags_v2);
@@ -239,7 +237,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuDeviceGetPCIBusId);
     DLSYM_HOOK_FUNC(cuDeviceGetDefaultMemPool);
     DLSYM_HOOK_FUNC(cuDeviceGetLuid);
-    DLSYM_HOOK_FUNC(cuDeviceGetUuid);
     DLSYM_HOOK_FUNC(cuDeviceGetMemPool);
     DLSYM_HOOK_FUNC(cuDeviceTotalMem_v2);
     DLSYM_HOOK_FUNC(cuPointerGetAttributes);
@@ -282,7 +279,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuMemsetD32Async);
     DLSYM_HOOK_FUNC(cuMemsetD8_v2);
     DLSYM_HOOK_FUNC(cuMemsetD8Async);
-    DLSYM_HOOK_FUNC(cuMemAdvise);
     DLSYM_HOOK_FUNC(cuEventCreate);
     DLSYM_HOOK_FUNC(cuEventDestroy_v2);
     DLSYM_HOOK_FUNC(cuModuleLoad);
@@ -330,7 +326,6 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuMemcpy3DAsync_v2);
     DLSYM_HOOK_FUNC(cuMemcpy3DPeer);
     DLSYM_HOOK_FUNC(cuMemcpy3DPeerAsync);
-    DLSYM_HOOK_FUNC(cuMemPrefetchAsync);
     DLSYM_HOOK_FUNC(cuMemRangeGetAttribute);
     DLSYM_HOOK_FUNC(cuMemRangeGetAttributes);
     // cuda 11.7 external resource interoperability
@@ -342,54 +337,10 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuSignalExternalSemaphoresAsync);
     DLSYM_HOOK_FUNC(cuWaitExternalSemaphoresAsync);
     DLSYM_HOOK_FUNC(cuDestroyExternalSemaphore);
-    // cuda Graph 
-    DLSYM_HOOK_FUNC(cuGraphCreate);
-    DLSYM_HOOK_FUNC(cuGraphAddKernelNode_v2);
-    DLSYM_HOOK_FUNC(cuGraphKernelNodeGetParams_v2);
-    DLSYM_HOOK_FUNC(cuGraphKernelNodeSetParams_v2);
-    DLSYM_HOOK_FUNC(cuGraphAddMemcpyNode);
-    DLSYM_HOOK_FUNC(cuGraphMemcpyNodeGetParams);
-    DLSYM_HOOK_FUNC(cuGraphMemcpyNodeSetParams);
-    DLSYM_HOOK_FUNC(cuGraphAddMemsetNode);
-    DLSYM_HOOK_FUNC(cuGraphMemsetNodeGetParams);
-    DLSYM_HOOK_FUNC(cuGraphMemsetNodeSetParams);
-    DLSYM_HOOK_FUNC(cuGraphAddHostNode);
-    DLSYM_HOOK_FUNC(cuGraphHostNodeGetParams);
-    DLSYM_HOOK_FUNC(cuGraphHostNodeSetParams);
-    DLSYM_HOOK_FUNC(cuGraphAddChildGraphNode);
-    DLSYM_HOOK_FUNC(cuGraphChildGraphNodeGetGraph);
-    DLSYM_HOOK_FUNC(cuGraphAddEmptyNode);
-    DLSYM_HOOK_FUNC(cuGraphAddEventRecordNode);
-    DLSYM_HOOK_FUNC(cuGraphEventRecordNodeGetEvent);
-    DLSYM_HOOK_FUNC(cuGraphEventRecordNodeSetEvent);
-    DLSYM_HOOK_FUNC(cuGraphAddEventWaitNode);
-    DLSYM_HOOK_FUNC(cuGraphEventWaitNodeGetEvent);
-    DLSYM_HOOK_FUNC(cuGraphEventWaitNodeSetEvent);
-    DLSYM_HOOK_FUNC(cuGraphAddExternalSemaphoresSignalNode);
-    DLSYM_HOOK_FUNC(cuGraphExternalSemaphoresSignalNodeGetParams);
-    DLSYM_HOOK_FUNC(cuGraphExternalSemaphoresSignalNodeSetParams);
-    DLSYM_HOOK_FUNC(cuGraphAddExternalSemaphoresWaitNode);
-    DLSYM_HOOK_FUNC(cuGraphExternalSemaphoresWaitNodeGetParams);
-    DLSYM_HOOK_FUNC(cuGraphExternalSemaphoresWaitNodeSetParams);
-    DLSYM_HOOK_FUNC(cuGraphExecExternalSemaphoresSignalNodeSetParams);
-    DLSYM_HOOK_FUNC(cuGraphExecExternalSemaphoresWaitNodeSetParams);
-    DLSYM_HOOK_FUNC(cuGraphClone);
-    DLSYM_HOOK_FUNC(cuGraphNodeFindInClone);
-    DLSYM_HOOK_FUNC(cuGraphNodeGetType);
-    DLSYM_HOOK_FUNC(cuGraphGetNodes);
-    DLSYM_HOOK_FUNC(cuGraphGetRootNodes);
-    DLSYM_HOOK_FUNC(cuGraphGetEdges);
-    DLSYM_HOOK_FUNC(cuGraphNodeGetDependencies);
-    DLSYM_HOOK_FUNC(cuGraphNodeGetDependentNodes);
-    DLSYM_HOOK_FUNC(cuGraphAddDependencies);
-    DLSYM_HOOK_FUNC(cuGraphRemoveDependencies);
-    DLSYM_HOOK_FUNC(cuGraphDestroyNode);
-    DLSYM_HOOK_FUNC(cuGraphInstantiate);
-    DLSYM_HOOK_FUNC(cuGraphInstantiateWithFlags);
-    DLSYM_HOOK_FUNC(cuGraphUpload);
+    // cuda Graph - only cuGraphLaunch is hooked (rate limiter). Others
+    // are pass-throughs with CUDA 13 signature changes; we let dlsym
+    // resolve them directly from libcuda.
     DLSYM_HOOK_FUNC(cuGraphLaunch);
-    DLSYM_HOOK_FUNC(cuGraphExecDestroy);
-    DLSYM_HOOK_FUNC(cuGraphDestroy);
 #ifdef HOOK_MEMINFO_ENABLE
     DLSYM_HOOK_FUNC(cuMemGetInfo);
     DLSYM_HOOK_FUNC(cuMemGetInfo_v2);

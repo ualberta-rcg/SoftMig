@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -254,6 +255,42 @@ size_t get_limit_from_config_or_env(const char* env_name) {
     }
     
     return result;
+}
+
+/** Parse a textual boolean ("1"/"true"/"yes"/"on", case-insensitive) into 0/1. */
+static int parse_bool(const char* s) {
+    if (s == NULL || s[0] == '\0') return 0;
+    if (strcmp(s, "1") == 0) return 1;
+    if (strcasecmp(s, "true") == 0) return 1;
+    if (strcasecmp(s, "yes") == 0) return 1;
+    if (strcasecmp(s, "on") == 0) return 1;
+    return 0;
+}
+
+/**
+ * Return whether the legacy in-library OOM killer should be enabled.
+ *
+ * Default is 0 (disabled): allocations that exceed the per-job limit return
+ * CUDA_ERROR_OUT_OF_MEMORY just like a real GPU. Enable explicitly to restore
+ * the SIGKILL-based defense.
+ *
+ * Priority:
+ *   1. Env var SOFTMIG_ENABLE_OOM_KILLER (any value parsed as bool).
+ *   2. SLURM config file key SOFTMIG_ENABLE_OOM_KILLER (only if in a SLURM job).
+ *   3. Default 0.
+ */
+int get_softmig_oom_killer_enabled(void) {
+    const char* env = getenv("SOFTMIG_ENABLE_OOM_KILLER");
+    if (env != NULL && env[0] != '\0') {
+        return parse_bool(env);
+    }
+
+    char value[64] = {0};
+    if (read_config_value("SOFTMIG_ENABLE_OOM_KILLER", value, sizeof(value))) {
+        return parse_bool(value);
+    }
+
+    return 0;
 }
 
 /** Return 1 if either CUDA_DEVICE_MEMORY_LIMIT or CUDA_DEVICE_SM_LIMIT is configured. */

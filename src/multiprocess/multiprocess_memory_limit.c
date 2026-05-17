@@ -5,8 +5,9 @@
  * Creates and maps an mmap-backed shared region (per SLURM job) that tracks
  * per-process GPU memory usage, SM utilization, and device limits. Provides
  * the semaphore-protected lock_shrreg/unlock_shrreg API, the active and
- * gradual OOM killers (cgroup/UID-aware), and NVML-based memory summation
- * with 9 MB minimum + 5 % overhead per process.
+ * gradual OOM killers (cgroup/UID-aware, disabled by default and gated by the
+ * SOFTMIG_ENABLE_OOM_KILLER env / config flag), and NVML-based memory
+ * summation using the raw per-process usedGpuMemory values.
  */
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -81,6 +82,10 @@ static int softmig_disabled = -1;  // -1 = not checked yet, 0 = enabled, 1 = dis
 
 // External function from config_file.c - reads from config file or env
 extern int is_softmig_configured(void);
+
+// External function from config_file.c - returns 1 if SOFTMIG_ENABLE_OOM_KILLER
+// is set (env or per-job config), 0 otherwise. Default is OOM killer disabled.
+extern int get_softmig_oom_killer_enabled(void);
 
 // Helper function to check if softmig is enabled
 static int is_softmig_enabled(void) {
@@ -1121,7 +1126,16 @@ void try_create_shrreg() {
         }
     }
 
-    enable_active_oom_killer = 1;
+    // Default: OOM killer disabled, so allocations over the per-job limit return
+    // CUDA_ERROR_OUT_OF_MEMORY (matching real-GPU behavior) instead of SIGKILL.
+    // Set SOFTMIG_ENABLE_OOM_KILLER=1 in env or the SLURM config file to restore
+    // the legacy active/gradual kill defense.
+    enable_active_oom_killer = get_softmig_oom_killer_enabled();
+    if (enable_active_oom_killer) {
+        LOG_WARN("SOFTMIG_ENABLE_OOM_KILLER is set - legacy in-library OOM killer enabled");
+    } else {
+        LOG_DEBUG("OOM killer disabled (default) - allocations over limit return CUDA_ERROR_OUT_OF_MEMORY");
+    }
     env_utilization_switch = 1;
     pthread_atfork(NULL, NULL, child_reinit_flag);
 

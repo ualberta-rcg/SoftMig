@@ -12,7 +12,6 @@ size_t usage = 0;
 
 int test(size_t bytes) {
     CUdeviceptr dptr;
-    uint64_t t_size;
     CHECK_DRV_API(cuMemAlloc(&dptr, bytes));
     CHECK_NVML_API(get_current_memory_usage(&usage));
     CHECK_DRV_API(cuMemFree(dptr));
