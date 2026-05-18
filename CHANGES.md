@@ -5,6 +5,21 @@ For deployment and usage instructions, see `README.md`.
 
 ---
 
+## 2026-05-18
+
+### Fix cuMemGetInfo to use real-time memory tracking
+
+`cuMemGetInfo` and `cuMemGetInfo_v2` were only using NVML-reported usage, which
+lags behind actual allocations. This caused the functions to report more free
+memory than was actually available during rapid allocation sequences.
+
+Added `get_current_usage_for_meminfo()` helper that returns `max(tracked_usage,
+nvml_usage)` — the same pattern used in `oom_check_nolock`. This ensures fast
+allocations are immediately reflected in memory queries while retaining
+cross-process visibility via NVML.
+
+---
+
 ## 2026-05-17
 
 ### Fix latent cuMemcpy2D / cuMemcpy2DUnaligned dispatch-table swap
