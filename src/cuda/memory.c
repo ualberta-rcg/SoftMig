@@ -22,6 +22,12 @@ extern uint64_t sum_process_memory_from_nvml(void* device);
 
 extern int pidfound;
 
+static uint64_t get_current_usage_for_meminfo(CUdevice cuda_dev, unsigned int nvml_dev_idx) {
+    uint64_t tracked_usage = get_gpu_memory_usage((int)nvml_dev_idx);
+    uint64_t nvml_usage = get_summed_device_memory_usage_from_nvml(cuda_dev);
+    return tracked_usage > nvml_usage ? tracked_usage : nvml_usage;
+}
+
 const size_t cuarray_format_bytes[33] = {
     0,  // 0x00
     1,  // CU_AD_FORMAT_UNSIGNED_INT8 = 0x01
@@ -466,20 +472,7 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo(size_t* free, size_t* total) {
     unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
     size_t limit = get_current_device_memory_limit(nvml_dev_idx);
     
-    // Always use summed NVML usage (cgroup/UID-filtered, raw per-process values).
-    // This ensures all processes see the same consistent usage value.
-    // No fallback - always use the summed calculation.
-    uint64_t usage = get_summed_device_memory_usage_from_nvml(dev);
-    
-    // If NVML query failed, usage will be 0, which is fine - it means no processes are using memory
-    // We don't fall back to tracked usage to ensure consistency
-    
-    // Try to get the actual summed value - we need NVML device handle
-    // Since we're in CUDA code, we can't easily access NVML device handles
-    // We'll need to either:
-    // 1. Export a function that takes CUDA device and returns summed usage
-    // 2. Or use the tracked usage (which should be updated)
-    // For now, let's create a helper function in multiprocess_memory_limit that does this
+    uint64_t usage = get_current_usage_for_meminfo(dev, nvml_dev_idx);
     
     // Check if real cuMemGetInfo exists, otherwise fall back to cuMemGetInfo_v2
     void* real_fn = CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo);
@@ -515,13 +508,7 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo_v2(size_t* free, size_t* total) {
     unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
     size_t limit = get_current_device_memory_limit(nvml_dev_idx);
     
-    // Always use summed NVML usage (cgroup/UID-filtered, raw per-process values).
-    // This ensures all processes see the same consistent usage value.
-    // No fallback - always use the summed calculation.
-    uint64_t usage = get_summed_device_memory_usage_from_nvml(dev);
-    
-    // If NVML query failed, usage will be 0, which is fine - it means no processes are using memory
-    // We don't fall back to tracked usage to ensure consistency
+    uint64_t usage = get_current_usage_for_meminfo(dev, nvml_dev_idx);
     if (limit == 0) {
         CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo_v2, free, total);
         *free = *total - usage;
