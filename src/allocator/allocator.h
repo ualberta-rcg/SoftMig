@@ -114,6 +114,10 @@ int free_raw(CUdeviceptr dptr);
 /** Track an externally-allocated chunk (e.g., cuMemAllocManaged) with OOM check. */
 int add_chunk_only(CUdeviceptr address,size_t size);
 
+/** Track an externally-allocated async chunk (e.g., cuMemAllocFromPoolAsync).
+ *  Caller has already run the OOM check and the real allocation. */
+int add_chunk_async_only(CUdeviceptr address,size_t size);
+
 /** Remove tracking for an externally-freed chunk. */
 int remove_chunk_only(CUdeviceptr address);
 

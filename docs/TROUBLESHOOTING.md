@@ -10,6 +10,34 @@ Inside a running SLURM job:
 - **Library is loaded**: `/etc/ld.so.preload` includes the installed `libsoftmig.so` path
 - **Logs exist**: `/var/log/softmig/{jobid}.log` (or `$SLURM_TMPDIR/softmig_{jobid}.log` fallback)
 
+## Symptom: `cudaFreeAsync failed ... UNKNOWN ERROR (-1)` and jobs leaking VRAM until `RESOURCE_EXHAUSTED`
+
+Signature: JAX/XLA jobs using `XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async` (or any
+app allocating from a memory pool via `cuMemAllocFromPoolAsync`) die in ~40 s
+with hundreds of `cudaFreeAsync failed to free ...: UNKNOWN ERROR (-1)` in
+stderr, with `nvidia-smi` showing free memory dropping steadily (512 MiB at a
+time) until the card is exhausted. Affects **full-GPU jobs too** — the
+incident jobs (`828986_*`, `condense-sweep`) were passive-mode jobs.
+
+Root cause (fixed 2026-09-09): `cuMemAllocFromPoolAsync` never recorded its
+allocations in the tracked list, and the `cuMemFreeAsync` hook returned `-1`
+for any untracked pointer **without calling the real driver free** — so every
+pool free failed and nothing was ever released. Related issues fixed at the
+same time: passive mode is now true pass-through for all memory hooks
+(including `cuMemGetInfo`, which used to report `free = total - cgroup_usage`
+instead of the driver value), untracked frees now fall back to the real
+driver free, OOM rejections return `CUDA_ERROR_OUT_OF_MEMORY` instead of
+`-1`, and pool allocations are limit-enforced in enabled mode.
+
+Checks on an affected node:
+
+- `grep -c 'res=-1' /var/log/softmig/*.log` — free failures log as
+  `after free_raw_async ... res=-1` at DEBUG level
+- confirm the installed library predates the 2026-09-09 fix:
+  `md5sum $(head -1 /etc/ld.so.preload)`
+- reproduce with `build/test/test_pool_free` (exit 2 = bug present,
+  exit 0 = fixed); see `test/suite_pool.sh`
+
 ## Symptom: `nvidia-smi` shows full VRAM in a sliced job
 
 Most common causes:

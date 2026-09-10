@@ -25,6 +25,8 @@ add_custom_command(
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/gen_version_script.sh
             ${CMAKE_CURRENT_SOURCE_DIR} ${SOFTMIG_VERSION_SCRIPT}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_version_script.sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/nvml/nvml_entry.c
+            ${CMAKE_CURRENT_SOURCE_DIR}/libsoftmig.c
     COMMENT "Generating SoftMig linker version script"
     VERBATIM
 )

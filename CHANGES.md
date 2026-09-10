@@ -5,6 +5,99 @@ For deployment and usage instructions, see `README.md`.
 
 ---
 
+## 2026-09-09
+
+### Passive mode is now true pass-through for all memory hooks
+
+Full-GPU jobs (no `gres/shard` -> no config file) previously still ran
+SoftMig's interposition logic on every hooked memory call: allocations were
+tracked in the `device_overallocated` / `device_allocasync` lists, untracked
+frees returned `-1`, `cuMemAllocAsync` issued extra pool-attribute queries,
+and `cuMemGetInfo` reported `free = total - cgroup_usage` instead of the
+driver's value. This broke JAX/XLA jobs using
+`XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async` (array jobs `828986_*`, 42/42 tasks
+failed with `cudaFreeAsync failed ... UNKNOWN ERROR (-1)`, leaking
+512 MiB at a time until the card was exhausted).
+
+Every memory hook now checks `softmig_passthrough()` (limit == 0) first and
+forwards straight to the real driver call with no tracking, OOM checks, or
+usage accounting: `cuMemAlloc_v2`, `cuMemFree_v2`, `cuMemAllocAsync`,
+`cuMemFreeAsync`, `cuMemAllocFromPoolAsync`, `cuMemAllocManaged`,
+`cuMemAllocPitch_v2`, `cuMemCreate`, `cuMemRelease`, `cuMemAllocHost_v2`,
+`cuMemHostAlloc`, `cuMemHostRegister_v2`, `cuArrayCreate_v2`,
+`cuArray3DCreate_v2`, `cuMipmappedArrayCreate`, and `cuMemGetInfo` /
+`cuMemGetInfo_v2` (which now return the real driver values for passive jobs).
+`cuLaunchKernel` throttling and NVML process-list filtering are unchanged —
+cgroup isolation is desired for all jobs.
+
+### Untracked frees now fall back to the real driver free
+
+`remove_chunk` and `remove_chunk_async` returned `-1` for any pointer not in
+the tracked list without calling the real driver free. This is what broke
+pool allocations in enabled mode too (a pool pointer freed with `cuMemFree`,
+or any allocation SoftMig failed to track, leaked forever). Both now forward
+untracked frees to the real `cuMemFree_v2` / `cuMemFreeAsync` and return the
+driver's result, so behavior is native-faithful: double-frees and bad
+pointers return real driver errors instead of `-1`. `remove_chunk` also
+propagates the real free's result on the tracked path instead of always
+returning 0. Fallback paths log at DEBUG level.
+
+### Proper OOM error code; post-alloc attribute failures no longer abandon allocations
+
+- `add_chunk_async` and `add_chunk_only` now return `CUDA_ERROR_OUT_OF_MEMORY`
+  instead of `-1` when the limit check fails (XLA/JAX retry logic depends on
+  the proper code).
+- In `add_chunk_async`, if `cuDeviceGetMemPool` or `cuMemPoolGetAttribute`
+  fail after a successful real allocation, the failure is now non-fatal: the
+  allocation is still tracked with the requested size instead of being left
+  live and untracked. A `RESERVED_MEM_HIGH` of 0 is handled the same way, and
+  the `device_allocasync->limit` counter is kept balanced with the tracked
+  entry lengths on all paths.
+
+### Pool allocations are now limit-enforced in enabled mode
+
+`cuMemAllocFromPoolAsync` was a pure pass-through that never tracked its
+allocations, so `gres/shard` jobs using the `cuda_async` allocator got no
+memory enforcement at all. It now runs `oom_check(dev, bytesize)` (returns
+`CUDA_ERROR_OUT_OF_MEMORY` when over the limit), calls the real function, and
+records successful allocations in `device_allocasync` via the new
+`add_chunk_async_only()` helper (requested-size tracking, mirroring
+`add_chunk_only`; no `RESERVED_MEM_HIGH` slab-delta accounting —
+`oom_check_nolock` already takes `max(tracked, NVML)`).
+
+### Test harness
+
+- New regression binary `test/test_pool_free.c` (exit 0 = PASS, 2 = bug
+  reproduced, 1 = setup error) covering the tracked async path, the XLA
+  75%-pool-prealloc pattern, a 20x alloc/free loop, sync free of a pool
+  pointer, passive `cuMemGetInfo` vs `nvidia-smi`, and over-limit pool
+  allocation returning `CUDA_ERROR_OUT_OF_MEMORY`.
+- New suites: `test/suite_pool.sh` (+ `suite_pool_inner.sh`) and
+  `test/jax_cuda_async.sh` (JAX end-to-end under `cuda_async`).
+- `test/run_matrix.sh` runs the new `pool` suite and adds the full-GPU
+  passive slice (`l40s`) for the `smoke`, `direct`, and `pool` suites.
+- Removed the `SOFTMIG_ROOT=/scratch/rahimk/SoftMig` hardcode from
+  `suite_common.sh`, `run_matrix.sh`, `run_oom_validation.sh`, and
+  `sbatch_oomval.sbatch` (derived from each script's own location now);
+  the lib hash lines in `run_multiproc.sh` / `run_oom_validation.sh` read
+  the installed library path from `/etc/ld.so.preload` instead of assuming
+  `/usr/local/lib`; fixed stale rack01-12 comments (reservation node is
+  rack01-11); `suite_smoke.sh` is passive-mode aware.
+- `suite_sm.sh` skips nvidia-smi samples from the first 12s (100% warmup
+  spike before the watcher settles) so the l40s.2 50% target is not
+  failed by startup.
+- `suite_crossjob.sh` occupies 3/4 L40S with a full-GPU blocker so the
+  two 1/4 shard jobs share the remaining card (SLURM otherwise spreads
+  shard jobs across GPUs; `CUDA_VISIBLE_DEVICES=0` is per-job remapped
+  and cannot pin them). PASS requires the same UUID and no cross-PID
+  leak in hooked nvidia-smi / `Found current process`.
+- Hook `nvmlDeviceGetComputeRunningProcesses_v3` and
+  `nvmlDeviceGetGraphicsRunningProcesses_v3`. Driver 595 `nvidia-smi`
+  dlsyms `_v3`, so the `_v2` filter never ran and two jobs on one GPU
+  could see each other's PIDs.
+
+---
+
 ## 2026-05-18
 
 ### Fix cuMemGetInfo to use real-time memory tracking

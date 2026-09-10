@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run inside a SLURM allocation on rack01-12. Starts N concurrent nvml_probe
+# Run inside a SLURM allocation on rack01-11. Starts N concurrent nvml_probe
 # instances, polls nvidia-smi, then collects logs.
 set -u
 N="${N:-4}"
@@ -23,7 +23,8 @@ echo "[harness] softmig config:"
 ls -la "/var/run/softmig/$SLURM_JOB_ID" 2>/dev/null || echo "  no /var/run/softmig/$SLURM_JOB_ID"
 cat "/var/run/softmig/$SLURM_JOB_ID"/* 2>/dev/null | sed 's/^/  /'
 echo "[harness] LD_PRELOAD=$(cat /etc/ld.so.preload 2>/dev/null)"
-echo "[harness] libsoftmig:"; ls -la /usr/local/lib/libsoftmig* 2>/dev/null
+lib_path=$(sed 's/#.*//' /etc/ld.so.preload 2>/dev/null | grep -v '^[[:space:]]*$' | head -1)
+echo "[harness] libsoftmig:"; ls -la "$lib_path" 2>/dev/null
 
 # Per-probe wall clock: HOLD + 90s margin (driver init, SM watcher, etc.)
 TLIM=$((HOLD + 90))

@@ -58,13 +58,26 @@ test/                   — test runners and CUDA probe binaries
 
 ## Key data flow
 
+- **Passive mode is pass-through**: jobs with no config file (full-GPU,
+  no `gres/shard`) get real driver behavior on every hooked memory call —
+  no tracking, no OOM checks, no usage accounting; `cuMemGetInfo` reports
+  real driver values. NVML process-list filtering still applies (cgroup
+  isolation is desired for all jobs). Mode is fixed for the process
+  lifetime (prolog writes the config before the job starts).
 - **Memory enforcement**: `cuMemAlloc` → allocator checks summed NVML usage
   against limit → returns `CUDA_ERROR_OUT_OF_MEMORY` if exceeded (matches
   real-GPU behavior). NVML usage is summed per-process from raw
   `usedGpuMemory` values using cgroup/UID filtering, with a 1-second TTL
-  cache; no per-process inflation is applied.
-- **Process isolation**: `nvmlDeviceGetComputeRunningProcesses` hooks filter
-  the process list by cgroup session (SLURM job) or UID fallback.
+  cache; no per-process inflation is applied. Pool allocations
+  (`cuMemAllocFromPoolAsync`) go through the same `oom_check` and are
+  tracked in `device_allocasync` (requested-size accounting).
+- **Free paths**: frees of tracked pointers update bookkeeping; frees of
+  untracked pointers (e.g. pool pointers via `cuMemFree`, or anything
+  SoftMig failed to track) fall back to the real driver free and return
+  its result.
+- **Process isolation**: `nvmlDeviceGetComputeRunningProcesses_v2`/`_v3`
+  (and graphics equivalents) filter the process list by cgroup session
+  (SLURM job) or UID fallback. Driver 595 `nvidia-smi` uses `_v3`.
 - **SM throttling**: utilization watcher thread sleeps kernel launches when
   a job exceeds its SM utilization quota. It also logs OOM events to syslog.
 - **Legacy OOM killer (opt-in)**: `active_oom_killer()` (per-allocation) and
@@ -92,11 +105,22 @@ test/                   — test runners and CUDA probe binaries
 
 ## Testing
 
+The test harness is `test/run_matrix.sh` + `test/suite_*.sh` (run on the
+`softmig` reservation, rack01-11):
+
 ```bash
-cd test
-./run_smoke.sh           # quick sanity check
-./run_overnight.sh       # long-running soak test
+test/run_matrix.sh                 # full matrix: CUDA 12.2/12.6/12.9/13.2 x
+                                    # l40s.2/l40s.4 slices + full-GPU passive
+                                    # smoke/direct/pool, one-off suites
+bash test/suite_pool.sh            # single suite (needs SLICE, CUDA_VER, OUT)
 ```
 
-Test binaries (`gpu_burn_lite`, `nvml_probe`, `runtime_hold`) build alongside
+Suites emit TSV lines (`cuda_ver slice suite jobid status metric detail`)
+and store artifacts under `test_results/matrix_<ts>/`. Key suites: `smoke`,
+`direct`, `sm`, `oom`, `crossjob`, `pool` (pool-allocation free-failure
+regression), plus one-offs `mixed`, `soak`, `nvsmi`. `test/jax_cuda_async.sh`
+is the JAX `cuda_async` end-to-end test (run inside a GPU allocation).
+
+Test binaries (`gpu_burn_lite`, `nvml_probe`, `runtime_hold`, `test_pool_free`,
+etc. — every `test/*.c` is globbed by `test/CMakeLists.txt`) build alongside
 the library via the main CMakeLists.txt.

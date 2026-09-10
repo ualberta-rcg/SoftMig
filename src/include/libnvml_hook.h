@@ -528,6 +528,10 @@ typedef enum {
   NVML_OVERRIDE_ENUM(nvmlDeviceGetComputeRunningProcesses_v2),
   /** nvmlDeviceGetGraphicsRunningProcesses_v2 */
   NVML_OVERRIDE_ENUM(nvmlDeviceGetGraphicsRunningProcesses_v2),
+  /** nvmlDeviceGetComputeRunningProcesses_v3 */
+  NVML_OVERRIDE_ENUM(nvmlDeviceGetComputeRunningProcesses_v3),
+  /** nvmlDeviceGetGraphicsRunningProcesses_v3 */
+  NVML_OVERRIDE_ENUM(nvmlDeviceGetGraphicsRunningProcesses_v3),
   /** nvmlDeviceSetTemperatureThreshold */
   NVML_OVERRIDE_ENUM(nvmlDeviceSetTemperatureThreshold),
   /** nvmlRetry_NvRmControl */
