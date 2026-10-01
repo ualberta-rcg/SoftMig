@@ -3,8 +3,9 @@
  * @brief NVML function wrappers with cgroup/UID-based process filtering.
  *
  * Provides the hooked implementations of nvmlDeviceGetComputeRunningProcesses
- * and nvmlDeviceGetGraphicsRunningProcesses that filter the process list by
- * cgroup session or UID, so each SLURM job only sees its own GPU processes.
+ * (_v2 and _v3) and nvmlDeviceGetGraphicsRunningProcesses (_v2 and _v3) that
+ * filter the process list by cgroup session or UID, so each SLURM job only
+ * sees its own GPU processes. Driver 535+ nvidia-smi uses the _v3 entry.
  * All other NVML functions are thin pass-through wrappers.
  */
 #include <pthread.h>
@@ -21,13 +22,57 @@
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
 
-// Forward declarations for v2 functions
+// Forward declarations for versioned process-list hooks
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
+                                                     unsigned int *infoCount,
+                                                     nvmlProcessInfo_t *infos);
+nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v3(nvmlDevice_t device,
                                                      unsigned int *infoCount,
                                                      nvmlProcessInfo_t *infos);
 nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(nvmlDevice_t device,
                                                      unsigned int *infoCount,
                                                      nvmlProcessInfo_t *infos);
+nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v3(nvmlDevice_t device,
+                                                     unsigned int *infoCount,
+                                                     nvmlProcessInfo_t *infos);
+
+/** Keep processes that share this job's cgroup (UID fallback if cgroup unknown). */
+static unsigned int filter_nvml_process_infos(const nvmlProcessInfo_t *all_infos,
+                                                unsigned int temp_count,
+                                                nvmlProcessInfo_t *infos,
+                                                unsigned int max_output) {
+  uid_t current_uid = getuid();
+  unsigned int filtered_count = 0;
+  for (unsigned int i = 0; i < temp_count; i++) {
+    unsigned int actual_pid = all_infos[i].pid;
+    if (actual_pid == 0) continue;
+
+    int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
+    int should_include = 0;
+
+    if (cgroup_check == 1) {
+      should_include = 1;
+    } else if (cgroup_check == 0) {
+      LOG_DEBUG("PID %u - different cgroup, skipping", actual_pid);
+    } else if (cgroup_check == -1) {
+      if (current_uid == 0) {
+        should_include = 1;
+      } else {
+        uid_t proc_uid = proc_get_uid(actual_pid);
+        if (proc_uid != (uid_t)-1 && proc_uid == current_uid)
+          should_include = 1;
+      }
+    }
+
+    if (should_include) {
+      if (infos != NULL && filtered_count < max_output)
+        infos[filtered_count] = all_infos[i];
+      filtered_count++;
+      if (filtered_count >= max_output && infos != NULL) break;
+    }
+  }
+  return filtered_count;
+}
 
 nvmlReturn_t nvmlShutdown(void) {
   return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlShutdown);
@@ -1496,43 +1541,48 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
     *infoCount = 0;
     return ret;
   }
-  
-  // Filter by cgroup session for all users (including root).
-  // Root still falls back to include-all if cgroup detection fails.
-  uid_t current_uid = getuid();
-  unsigned int filtered_count = 0;
-  unsigned int max_output = *infoCount;
 
-  for (unsigned int i = 0; i < temp_count; i++) {
-    unsigned int actual_pid = all_infos[i].pid;
-    if (actual_pid == 0) continue;
-
-    int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
-    int should_include = 0;
-
-    if (cgroup_check == 1) {
-      should_include = 1;
-    } else if (cgroup_check == -1) {
-      if (current_uid == 0) {
-        should_include = 1;
-      } else {
-        uid_t proc_uid = proc_get_uid(actual_pid);
-        if (proc_uid != (uid_t)-1 && proc_uid == current_uid)
-          should_include = 1;
-      }
-    }
-
-    if (should_include) {
-      if (infos != NULL && filtered_count < max_output)
-        infos[filtered_count] = all_infos[i];
-      filtered_count++;
-      if (filtered_count >= max_output && infos != NULL) break;
-    }
-  }
-
+  unsigned int filtered_count = filter_nvml_process_infos(
+      all_infos, temp_count, infos, *infoCount);
   *infoCount = filtered_count;
   return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
 }
+
+/**
+ * Driver 535+ (including 595) nvidia-smi dlsyms this, not _v2.
+ * Same nvmlProcessInfo_t ABI as v2.
+ */
+nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v3(nvmlDevice_t device,
+                                                     unsigned int *infoCount,
+                                                     nvmlProcessInfo_t *infos) {
+  unsigned int dev_idx_for_invalidate;
+  if (NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetIndex,
+                         device, &dev_idx_for_invalidate) == NVML_SUCCESS) {
+    nvml_cache_invalidate((int)dev_idx_for_invalidate);
+  }
+
+  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
+  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
+
+  nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
+                         nvmlDeviceGetComputeRunningProcesses_v3, device,
+                         &temp_count, all_infos);
+
+  if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
+    LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v3: Buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.",
+             temp_count, SHARED_REGION_MAX_PROCESS_NUM);
+  } else if (ret != NVML_SUCCESS) {
+    LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v3: NVML call failed with error %d", ret);
+    *infoCount = 0;
+    return ret;
+  }
+
+  unsigned int filtered_count = filter_nvml_process_infos(
+      all_infos, temp_count, infos, *infoCount);
+  *infoCount = filtered_count;
+  return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
+}
+
 nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
   nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
@@ -1546,38 +1596,29 @@ nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
     *infoCount = 0;
     return ret;
   }
-  
-  uid_t current_uid = getuid();
-  unsigned int filtered_count = 0;
-  unsigned int max_output = *infoCount;
 
-  for (unsigned int i = 0; i < temp_count; i++) {
-    unsigned int actual_pid = all_infos[i].pid;
-    if (actual_pid == 0) continue;
+  unsigned int filtered_count = filter_nvml_process_infos(
+      all_infos, temp_count, infos, *infoCount);
+  *infoCount = filtered_count;
+  return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
+}
 
-    int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
-    int should_include = 0;
+nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v3(
+    nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
+  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
 
-    if (cgroup_check == 1) {
-      should_include = 1;
-    } else if (cgroup_check == -1) {
-      if (current_uid == 0) {
-        should_include = 1;
-      } else {
-        uid_t proc_uid = proc_get_uid(actual_pid);
-        if (proc_uid != (uid_t)-1 && proc_uid == current_uid)
-          should_include = 1;
-      }
-    }
+  nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
+                         nvmlDeviceGetGraphicsRunningProcesses_v3, device,
+                         &temp_count, all_infos);
 
-    if (should_include) {
-      if (infos != NULL && filtered_count < max_output)
-        infos[filtered_count] = all_infos[i];
-      filtered_count++;
-      if (filtered_count >= max_output && infos != NULL) break;
-    }
+  if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
+    *infoCount = 0;
+    return ret;
   }
 
+  unsigned int filtered_count = filter_nvml_process_infos(
+      all_infos, temp_count, infos, *infoCount);
   *infoCount = filtered_count;
   return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
 }

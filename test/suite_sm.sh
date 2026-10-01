@@ -4,6 +4,9 @@
 # CUDA_DEVICE_SM_LIMIT.
 
 SUITE=sm
+
+# 36s burn: the first ~10s are a 100% spike before the watcher settles.
+DEFAULT_SRUN_TIME="${DEFAULT_SRUN_TIME:-00:08:00}"
 . "$(dirname "$0")/suite_common.sh"
 
 srun --reservation=softmig ${SRUN_EXTRA:-} --gres=gpu:${SLICE}:1 --cpus-per-task=8 --mem=8G \
@@ -11,7 +14,7 @@ srun --reservation=softmig ${SRUN_EXTRA:-} --gres=gpu:${SLICE}:1 --cpus-per-task
 module load cuda/${CUDA_VER}
 cd ${SOFTMIG_ROOT}
 export SOFTMIG_LOG_LEVEL=5
-N=3 MB=1024 DUR=20 OUT='${OUT}' test/run_burn.sh >/dev/null 2>&1
+N=3 MB=1024 DUR=36 OUT='${OUT}' test/run_burn.sh >/dev/null 2>&1
 _copy_softmig_log \$SLURM_JOB_ID '${OUT}/softmig.log'
 cat /var/run/softmig/\$SLURM_JOB_ID.conf > '${OUT}/softmig.conf' 2>/dev/null
 echo \$SLURM_JOB_ID > '${OUT}/jid.txt'
@@ -31,8 +34,23 @@ fi
 sm_limit=$(grep -oE "CUDA_DEVICE_SM_LIMIT=[0-9]+" "$conf" 2>/dev/null | cut -d= -f2)
 [ -z "$sm_limit" ] && sm_limit=0
 
-# Average observed GPU util (skip zero-samples which are just pre-start)
-avg=$(grep -E "^[0-9]+ %" "$nvl" | awk -F% 'BEGIN{s=0;n=0} {v=$1+0; if(v>0){s+=v;n++}} END{if(n>0) printf "%.1f", s/n; else print "0"}')
+# Average observed GPU util after warmup. nvidia-smi reads 100% for the
+# first few samples while gpu_burn starts and the watcher has not yet
+# slept launches; those spikes (not the settled throttle) caused 61-68%
+# averages on l40s.2. Skip t<12s and zero samples.
+avg=$(awk '
+  /^==== t=/ {
+    t=$0
+    sub(/^==== t=/, "", t)
+    sub(/ ===.*/, "", t)
+    t=t+0
+  }
+  /^[0-9]+ %/ {
+    v=$1+0
+    if (t>=12 && v>0) { s+=v; n++ }
+  }
+  END { if (n>0) printf "%.1f", s/n; else print "0" }
+' "$nvl")
 
 err_cnt=$(grep -c "softmig ERROR" "$slog")
 reg_cnt=$(grep -c "set_task_pid: Found current process PID" "$slog")

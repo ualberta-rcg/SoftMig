@@ -22,6 +22,24 @@ extern uint64_t sum_process_memory_from_nvml(void* device);
 
 extern int pidfound;
 
+// Passive mode (no config file -> limit == 0): memory hooks pass through to
+// the real driver with no tracking, OOM checks, or usage accounting. The
+// prolog writes the config before the job starts, so the mode cannot change
+// during the lifetime of a process. get_current_device_memory_limit()
+// returns 0 both when SoftMig is disabled and when there is no shared region.
+static inline int softmig_passthrough(CUdevice dev) {
+    return get_current_device_memory_limit(dev) == 0;
+}
+
+// Guard for memory hooks: on cuCtxGetDevice failure (no context) or in
+// passive mode, forward to the real driver call untouched.
+#define SOFTMIG_MEM_GUARD(dev, real_fn, ...)                                  \
+    CUdevice dev;                                                             \
+    if (CUDA_OVERRIDE_CALL(cuda_library_entry, cuCtxGetDevice, &dev) != CUDA_SUCCESS || \
+        softmig_passthrough(dev)) {                                           \
+        return CUDA_OVERRIDE_CALL(cuda_library_entry, real_fn, ##__VA_ARGS__); \
+    }
+
 static uint64_t get_current_usage_for_meminfo(CUdevice cuda_dev, unsigned int nvml_dev_idx) {
     uint64_t tracked_usage = get_gpu_memory_usage((int)nvml_dev_idx);
     uint64_t nvml_usage = get_summed_device_memory_usage_from_nvml(cuda_dev);
@@ -114,10 +132,9 @@ uint64_t compute_array_alloc_bytes(const CUDA_ARRAY_DESCRIPTOR* desc) {
 
 CUresult cuArray3DCreate_v2(CUarray* arr, const CUDA_ARRAY3D_DESCRIPTOR* desc) {
     LOG_DEBUG("cuArray3DCreate_v2");
-    ENSURE_RUNNING();
     uint64_t bytes = compute_3d_array_alloc_bytes(desc);
-    CUdevice dev;
-    CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetDevice,&dev);
+    ENSURE_RUNNING();
+    SOFTMIG_MEM_GUARD(dev, cuArray3DCreate_v2, arr, desc);
     if (oom_check(dev, bytes)) {
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
@@ -128,10 +145,9 @@ CUresult cuArray3DCreate_v2(CUarray* arr, const CUDA_ARRAY3D_DESCRIPTOR* desc) {
 
 CUresult cuArrayCreate_v2(CUarray* arr, const CUDA_ARRAY_DESCRIPTOR* desc) {
     LOG_DEBUG("cuArrayCreate_v2");
-    ENSURE_RUNNING();
     uint64_t bytes = compute_array_alloc_bytes(desc);
-    CUdevice dev;
-    CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetDevice,&dev);
+    ENSURE_RUNNING();
+    SOFTMIG_MEM_GUARD(dev, cuArrayCreate_v2, arr, desc);
     if (oom_check(dev, bytes)) {
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
@@ -158,15 +174,14 @@ CUresult cuMemoryAllocate(CUdeviceptr* dptr, size_t bytesize, void* data) {
 
 CUresult cuMemAlloc_v2(CUdeviceptr* dptr, size_t bytesize) {
     ENSURE_RUNNING();
-    CUresult res = allocate_raw(dptr,bytesize);
-    if (res!=CUDA_SUCCESS)
-        return res;
-    return CUDA_SUCCESS;
+    SOFTMIG_MEM_GUARD(dev, cuMemAlloc_v2, dptr, bytesize);
+    return allocate_raw(dptr,bytesize);
 }
 
 CUresult cuMemAllocHost_v2(void** hptr, size_t bytesize) {
     LOG_DEBUG("cuMemAllocHost_v2 hptr=%p bytesize=%ld",hptr,bytesize);
     ENSURE_RUNNING();
+    SOFTMIG_MEM_GUARD(dev, cuMemAllocHost_v2, hptr, bytesize);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocHost_v2, hptr, bytesize);
     if (res != CUDA_SUCCESS) {
         return res;
@@ -181,8 +196,7 @@ CUresult cuMemAllocHost_v2(void** hptr, size_t bytesize) {
 CUresult cuMemAllocManaged(CUdeviceptr* dptr, size_t bytesize, unsigned int flags) {
     LOG_DEBUG("cuMemAllocManaged dptr=%p bytesize=%ld",dptr,bytesize);
     ENSURE_RUNNING();
-    CUdevice dev;
-    CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetDevice,&dev);
+    SOFTMIG_MEM_GUARD(dev, cuMemAllocManaged, dptr, bytesize, flags);
     if (oom_check(dev,bytesize)){
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
@@ -199,8 +213,7 @@ CUresult cuMemAllocPitch_v2(CUdeviceptr* dptr, size_t* pPitch, size_t WidthInByt
     size_t guess_pitch = (((WidthInBytes - 1) / ElementSizeBytes) + 1) * ElementSizeBytes;
     size_t bytesize = guess_pitch * Height;
     ENSURE_RUNNING();
-    CUdevice dev;
-    CUDA_OVERRIDE_CALL(cuda_library_entry,cuCtxGetDevice,&dev);
+    SOFTMIG_MEM_GUARD(dev, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
     if (oom_check(dev,bytesize)){
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
@@ -216,8 +229,8 @@ CUresult cuMemFree_v2(CUdeviceptr dptr) {
     if (dptr == 0) {  // NULL
         return CUDA_SUCCESS;
     }
-    CUresult res = free_raw(dptr);
-    return res;
+    SOFTMIG_MEM_GUARD(dev, cuMemFree_v2, dptr);
+    return free_raw(dptr);
 }
 
 
@@ -230,6 +243,7 @@ CUresult cuMemFreeHost(void* hptr) {
 CUresult cuMemHostAlloc(void** hptr, size_t bytesize, unsigned int flags) {
     LOG_DEBUG("cuMemHostAlloc hptr=%p bytesize=%lu",hptr,bytesize);
     ENSURE_RUNNING();
+    SOFTMIG_MEM_GUARD(dev, cuMemHostAlloc, hptr, bytesize, flags);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemHostAlloc, hptr, bytesize, flags);
     if (res != CUDA_SUCCESS) {
         return res;
@@ -245,8 +259,7 @@ CUresult cuMemHostAlloc(void** hptr, size_t bytesize, unsigned int flags) {
 
 CUresult cuMemHostRegister_v2(void* hptr, size_t bytesize, unsigned int flags) {
     LOG_DEBUG("cuMemHostRegister_v2 hptr=%p bytesize=%ld",hptr,bytesize);
-    CUdevice dev;
-    cuCtxGetDevice(&dev);
+    SOFTMIG_MEM_GUARD(dev, cuMemHostRegister_v2, hptr, bytesize, flags);
     ENSURE_RUNNING();
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemHostRegister_v2, hptr, bytesize, flags);
     LOG_DEBUG("cuMemHostRegister_v2 returned :%d(%p:%ld)",res,hptr,bytesize);
@@ -471,21 +484,22 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo(size_t* free, size_t* total) {
     
     unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
     size_t limit = get_current_device_memory_limit(nvml_dev_idx);
-    
-    uint64_t usage = get_current_usage_for_meminfo(dev, nvml_dev_idx);
-    
+
     // Check if real cuMemGetInfo exists, otherwise fall back to cuMemGetInfo_v2
     void* real_fn = CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo);
     if (real_fn == NULL) {
         LOG_DEBUG("cuMemGetInfo not found, falling back to cuMemGetInfo_v2");
         return cuMemGetInfo_v2(free, total);
     }
-    
+
     if (limit == 0) {
-        CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo, free, total);
-        *free = *total - usage;
-        return CUDA_SUCCESS;
-    } else if (limit < usage) {
+        // Passive mode: report the real driver values unchanged
+        return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo, free, total);
+    }
+
+    uint64_t usage = get_current_usage_for_meminfo(dev, nvml_dev_idx);
+
+    if (limit < usage) {
         LOG_WARN("limit < usage; usage=%ld, limit=%ld", usage, limit);
         return CUDA_ERROR_INVALID_VALUE;
     } else {
@@ -507,13 +521,14 @@ FUNC_ATTR_VISIBLE CUresult cuMemGetInfo_v2(size_t* free, size_t* total) {
     
     unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
     size_t limit = get_current_device_memory_limit(nvml_dev_idx);
-    
-    uint64_t usage = get_current_usage_for_meminfo(dev, nvml_dev_idx);
+
     if (limit == 0) {
-        CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo_v2, free, total);
-        *free = *total - usage;
-        return CUDA_SUCCESS;
-    } else if (limit < usage) {
+        // Passive mode: report the real driver values unchanged
+        return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo_v2, free, total);
+    }
+
+    uint64_t usage = get_current_usage_for_meminfo(dev, nvml_dev_idx);
+    if (limit < usage) {
         LOG_WARN("limit < usage; usage=%ld, limit=%ld", usage, limit);
         return CUDA_ERROR_INVALID_VALUE;
     } else {
@@ -531,6 +546,7 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray* pHandle,
                                           const CUDA_ARRAY3D_DESCRIPTOR* pMipmappedArrayDesc, 
                                           unsigned int numMipmapLevels) {
     LOG_DEBUG("cuMipmappedArrayCreate\n");
+    SOFTMIG_MEM_GUARD(dev, cuMipmappedArrayCreate, pHandle, pMipmappedArrayDesc, numMipmapLevels);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMipmappedArrayCreate, pHandle, pMipmappedArrayDesc, numMipmapLevels);
     if (res != CUDA_SUCCESS) {
         return res;
@@ -581,8 +597,7 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
 
 CUresult cuMemCreate ( CUmemGenericAllocationHandle* handle, size_t size, const CUmemAllocationProp* prop, unsigned long long flags ) {
     ENSURE_RUNNING();
-    CUdevice dev;
-    CUDA_OVERRIDE_CALL(cuda_library_entry, cuCtxGetDevice, &dev);
+    SOFTMIG_MEM_GUARD(dev, cuMemCreate, handle, size, prop, flags);
     if (oom_check(dev, size)) {
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
@@ -595,6 +610,7 @@ CUresult cuMemCreate ( CUmemGenericAllocationHandle* handle, size_t size, const 
 }
 
 CUresult cuMemRelease(CUmemGenericAllocationHandle handle) {
+    SOFTMIG_MEM_GUARD(dev, cuMemRelease, handle);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry, cuMemRelease, handle);
     if (res == CUDA_SUCCESS) {
         remove_chunk_only(handle);
@@ -615,6 +631,7 @@ CUresult cuMemImportFromShareableHandle(CUmemGenericAllocationHandle* handle,
 }
 
 CUresult cuMemAllocAsync(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
+    SOFTMIG_MEM_GUARD(dev, cuMemAllocAsync, dptr, bytesize, hStream);
     LOG_DEBUG("cuMemAllocAsync:%ld",bytesize);
     return allocate_async_raw(dptr,bytesize,hStream);
 }
@@ -624,6 +641,7 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
     if (dptr == 0) {  // NULL
         return CUDA_SUCCESS;
     }
+    SOFTMIG_MEM_GUARD(dev, cuMemFreeAsync, dptr, hStream);
     CUresult res = free_raw_async(dptr,hStream);
     LOG_DEBUG("after free_raw_async dptr=%p res=%d",(void *)dptr,res);
     return res;
@@ -667,7 +685,16 @@ CUresult cuMemPoolDestroy(CUmemoryPool pool) {
 }
 
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream) {
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocFromPoolAsync,dptr,bytesize,pool,hStream);
+    SOFTMIG_MEM_GUARD(dev, cuMemAllocFromPoolAsync, dptr, bytesize, pool, hStream);
+    if (oom_check(dev, bytesize)) {
+        LOG_ERROR("cuMemAllocFromPoolAsync: Device %d OOM (requested %lu bytes)", dev, bytesize);
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocFromPoolAsync,dptr,bytesize,pool,hStream);
+    if (res == CUDA_SUCCESS) {
+        add_chunk_async_only(*dptr, bytesize);
+    }
+    return res;
 }
 
 CUresult cuMemPoolExportToShareableHandle(void *handle_out, CUmemoryPool pool, CUmemAllocationHandleType handleType, unsigned long long flags) {

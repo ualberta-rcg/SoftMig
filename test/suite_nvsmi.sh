@@ -1,8 +1,8 @@
 #!/bin/bash
 # Suite 8: nvidia-smi cgroup filtering — run nvidia-smi from inside a job and
 # verify it shows ONLY our own process(es), not whatever else is on the GPU.
-# This validates that our hook of nvmlDeviceGetComputeRunningProcesses_v2
-# correctly filters by cgroup.
+# This validates that our hook of nvmlDeviceGetComputeRunningProcesses_v3
+# (driver 535+ nvidia-smi; _v2 is also hooked) correctly filters by cgroup.
 
 SUITE=nvsmi
 SLICE=${SLICE:-l40s.4}

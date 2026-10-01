@@ -13,7 +13,8 @@ set -u
 : "${OUT:?OUT is required}"
 : "${SUITE:?SUITE is required}"
 
-SOFTMIG_ROOT=/scratch/rahimk/SoftMig
+SOFTMIG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export SOFTMIG_ROOT
 mkdir -p "$OUT"
 
 _emit() {

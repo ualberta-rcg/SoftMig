@@ -271,6 +271,8 @@ entry_t nvml_library_entry[] = {
     {.name = "nvmlComputeInstanceGetInfo_v2"},
     {.name = "nvmlDeviceGetComputeRunningProcesses_v2"},
     {.name = "nvmlDeviceGetGraphicsRunningProcesses_v2"},
+    {.name = "nvmlDeviceGetComputeRunningProcesses_v3"},
+    {.name = "nvmlDeviceGetGraphicsRunningProcesses_v3"},
     {.name = "nvmlDeviceSetTemperatureThreshold"},
     //{.name = "nvmlRetry_NvRmControl"},
     {.name = "nvmlVgpuInstanceGetGpuInstanceId"},
@@ -370,11 +372,8 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
         int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
         
         if (cgroup_check == -1) {
-            // Couldn't determine cgroup or not in a cgroup session - fall back to UID check
             uid_t proc_uid = proc_get_uid(actual_pid);
-            
             if (proc_uid == (uid_t)-1) {
-                // Couldn't read UID - skip this process to avoid blocking on shared region lock
                 skipped_count++;
                 continue;
             } else if (proc_uid != current_uid) {
@@ -382,11 +381,11 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
                 continue;
             }
         } else if (cgroup_check == 0) {
-            // Process is in a different cgroup session - skip it
+            LOG_DEBUG("PID %u - different cgroup, skipping", actual_pid);
             skipped_count++;
             continue;
         }
-        // cgroup_check == 1 means process belongs to current cgroup session - include it
+        // cgroup_check == 1 (or UID fallback match): include this process
         
         included_count++;
         

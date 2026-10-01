@@ -828,6 +828,10 @@ void* __dlsym_hook_section_nvml(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(nvmlDeviceGetComputeRunningProcesses_v2);
     /** nvmlDeviceGetGraphicsRunningProcesses_v2 */
     DLSYM_HOOK_FUNC(nvmlDeviceGetGraphicsRunningProcesses_v2);
+    /** nvmlDeviceGetComputeRunningProcesses_v3 */
+    DLSYM_HOOK_FUNC(nvmlDeviceGetComputeRunningProcesses_v3);
+    /** nvmlDeviceGetGraphicsRunningProcesses_v3 */
+    DLSYM_HOOK_FUNC(nvmlDeviceGetGraphicsRunningProcesses_v3);
     /** nvmlDeviceSetTemperatureThreshold */
     DLSYM_HOOK_FUNC(nvmlDeviceSetTemperatureThreshold);
     /** nvmlVgpuInstanceGetGpuInstanceId */

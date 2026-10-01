@@ -24,10 +24,23 @@ if [ ! -s "$slog" ]; then
 fi
 
 init_ok=$(grep -c "Initializing\.\.\.\.\." "$slog")
-cfg_ok=$(grep -c "Read CUDA_DEVICE_MEMORY_LIMIT=" "$slog")
 reg_ok=$(grep -c "set_task_pid: Found current process PID" "$slog")
 err_cnt=$(grep -c "softmig ERROR" "$slog")
 
+if [ "${SLICE}" = "l40s" ]; then
+    # Full-GPU passive job: no config file, library must stay passive but
+    # still initialize and register the PID.
+    cfg_ok=$(grep -c "softmig disabled (passive mode)" "$slog")
+    metric="init=${init_ok} passive=${cfg_ok} reg=${reg_ok} err=${err_cnt}"
+    if [ "$init_ok" -ge 1 ] && [ "$cfg_ok" -ge 1 ] && [ "$reg_ok" -ge 1 ]; then
+        _emit "$jid" PASS "$reg_ok" "$metric"
+    else
+        _emit "$jid" FAIL "$reg_ok" "$metric"
+    fi
+    exit 0
+fi
+
+cfg_ok=$(grep -c "Read CUDA_DEVICE_MEMORY_LIMIT=" "$slog")
 metric="init=${init_ok} cfg=${cfg_ok} reg=${reg_ok} err=${err_cnt}"
 
 if [ "$init_ok" -ge 1 ] && [ "$cfg_ok" -ge 1 ] && [ "$reg_ok" -ge 1 ]; then

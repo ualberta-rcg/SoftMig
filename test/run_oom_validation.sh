@@ -6,14 +6,16 @@
 set -u
 
 OUT="${OUT:-/tmp/softmig_oomval_${SLURM_JOB_ID:-$$}}"
-SOFTMIG_ROOT="${SOFTMIG_ROOT:-/scratch/rahimk/SoftMig}"
+SOFTMIG_ROOT="${SOFTMIG_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 mkdir -p "$OUT"
 
 cd "$SOFTMIG_ROOT"
 
 echo "=== softmig OOM validation ==="
 echo "job=$SLURM_JOB_ID node=$(hostname) out=$OUT"
-echo "lib hash: $(sha256sum /usr/local/lib/libsoftmig.so 2>/dev/null | awk '{print $1}')"
+lib_path=$(sed 's/#.*//' /etc/ld.so.preload 2>/dev/null | grep -v '^[[:space:]]*$' | head -1)
+echo "lib path: ${lib_path:-unknown}"
+echo "lib hash: $(sha256sum "$lib_path" 2>/dev/null | awk '{print $1}')"
 echo "slice cfg:"
 sed 's/^/  /' "/var/run/softmig/${SLURM_JOB_ID}.conf" 2>/dev/null || echo "  (no config file)"
 echo
