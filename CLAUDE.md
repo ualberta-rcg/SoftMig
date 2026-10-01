@@ -94,7 +94,8 @@ test/                   — test runners and CUDA probe binaries
 
 ```bash
 cd test
-./run_smoke.sh           # quick sanity check
+./suite_smoke.sh         # quick sanity check
+./run_matrix.sh          # full matrix (CUDA versions x slices x suites)
 ./run_overnight.sh       # long-running soak test
 ```
 
