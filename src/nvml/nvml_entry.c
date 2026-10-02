@@ -97,6 +97,7 @@ static nvmlReturn_t softmig_filtered_process_list(softmig_proc_list_fn real, con
   }
   unsigned int capacity = (infos == NULL) ? 0 : *infoCount;
   unsigned int needed = filter_nvml_process_infos(all_infos, temp_count, infos, capacity);
+  LOG_DEBUG("%s: driver=%u visible=%u capacity=%u", name, temp_count, needed, capacity);
   *infoCount = needed;
   return (needed > capacity) ? NVML_ERROR_INSUFFICIENT_SIZE : NVML_SUCCESS;
 }
@@ -1652,6 +1653,11 @@ nvmlReturn_t nvmlDeviceGetRunningProcessDetailList(nvmlDevice_t device, void *pl
   nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetRunningProcessDetailList,
                                                device, plist);
   softmig_nvmlProcessDetailList_v1_t *list = plist;
+  if (list != NULL) {
+    LOG_DEBUG("nvmlDeviceGetRunningProcessDetailList: ret=%d version=0x%x (v1=0x%x) mode=%u entries=%u array=%s",
+              (int)ret, list->version, SOFTMIG_NVML_STRUCT_V1(softmig_nvmlProcessDetailList_v1_t),
+              list->mode, list->numProcArrayEntries, list->procArray ? "set" : "NULL");
+  }
   // A size query (NULL procArray) keeps the driver's upper bound.
   if (ret != NVML_SUCCESS || list == NULL || list->procArray == NULL ||
       list->version != SOFTMIG_NVML_STRUCT_V1(softmig_nvmlProcessDetailList_v1_t)) {

@@ -86,6 +86,57 @@ from the reservation node, and with `SOFTMIG_TEST_SUDO=1` for the root-side
 `security` cases. All of this runs as jobs on the reservation; nothing is
 tested on the login node.
 
+## Pressure campaign: sets of jobs judged against root truth
+
+The suites in this section run *sets* of jobs on the reservation node and
+grade every job against what root sees, not what the job reports about
+itself. `test/node_sampler.sh start|stop OUT` runs on the node over
+`sudo ssh` (from the login node, outside any job) and records
+`nvidia-smi pmon -s um`, `--query-compute-apps` and a PID -> Slurm-job map
+from `/proc/<pid>/cgroup` once a second. `test/share_lib.sh` launches jobs
+(`run_job`, `run_array`), writes an `expect.txt` per job (`limit`, `sm`,
+`min_mem`, `min_sm`, `max_sm`, `oom`, `view_total`, `rc`) and
+`test/share_report.py` produces `jobs.tsv` with a verdict per job and per
+scenario: `PASS`, `LEAK` (another job's process was visible; nothing else
+wrong), `FAIL`, `PARTIAL` (jobs landed on more than one GPU, so the share
+numbers mean little), `INFO`. Shard jobs are packed onto one GPU with a
+3-GPU blocker job (`pack_blocker 3`).
+
+| Suite | Scenarios | Checks |
+|---|---|---|
+| `suite_share.sh` | S1-S7 | 2/4 quarters, 2 halves, half+2 quarters share SM and memory; OOM neighbour; late joiner; nvidia-smi view |
+| | G1-G6 | 4 quarters each allocate their full limit; late victim gets its limit; fixed work loses < 40 % with 3 neighbours; 60/40; allocation-storm neighbour; SIGSTOP lock-hog neighbour |
+| | W1 | `nvidia-smi-hook.sh` on `PATH` hides the other job (table, pmon, query) |
+| `suite_passthrough.sh` | P1-P4 | whole-GPU job: no conf, `view_total` = card, > 80 % SM, > 20 GB, while a quarter next to it is enforced; two-GPU job; over-allocating quarter beside a whole-GPU holder; whole + half + quarter |
+| `suite_mixed_pieces.sh` | M1-M6 | `.4:2` + 2x`.4`; `.4:3` + `.4`; mixed-size request (INFO); 4-task array; two `srun` steps in one `.4:2` job; whole + half + two quarters |
+| `suite_gpuburn.sh` | B1-B5 | real `~/gpu-burn`: `gb && gb` in one job, x3 concurrently, x4 jobs, next to PyTorch, whole vs sliced; every PID registered, `GPU 0: OK`, no `FAULTY` |
+| `suite_isolation.sh` | | same uid, two jobs: no cross-job accounting, OOM killer stays in its job, foreign-uid and region checks (root side with `SOFTMIG_TEST_SUDO=1`) |
+| `suite_bypass.sh` | | `bypass_probe.cu`: every allocation API vs root usage -> `CAPPED` / `LEAK` / `UNHOOKED`; `PASSTHROUGH` on a whole GPU |
+| `suite_storm.sh` | A/B/C | random churn of ten job kinds for N minutes (`STORM_MINUTES`, `STORM_PAR`, `STORM_SEED`); B = 8 parallel `suite_nvsmi.sh` + 4 burners |
+
+Drivers:
+
+```bash
+umask 002
+bash test/run_sets.sh                     # whole campaign, all CUDA versions, ~2 h
+SETS=share,gpuburn bash test/run_sets.sh  # subset
+cat $(cat test_results/sets_latest.txt)/SUMMARY.md
+
+HOURS=8 nohup bash test/run_overnight.sh > test_results/overnight_run.log 2>&1 &
+cat $(cat test_results/overnight_latest.txt)/SUMMARY.md   # in the morning
+```
+
+`run_overnight.sh` starts one shared root sampler and submits
+`overnight_driver.sh` as a CPU-only job on the reservation; the driver unsets
+`SLURM_*` and keeps launching cycles (direct/oom/sm per version, share,
+passthrough, mixed, gpuburn, isolation, soak, storm A and B) until the hours
+are up. Rules learned the hard way: never reuse an `OUT` directory (NFS keeps
+the deleted inode on the node), always give the sampler an absolute path,
+never run two campaigns at once on the node (they would share GPUs and the
+share numbers become meaningless), and `sudo` is not available inside jobs,
+so the sampler must be started from the login node. Real `gpu_burn` binaries
+are built once per CUDA version with `test/build_gpuburn.sh`.
+
 `test/audit_hooks.sh [libsoftmig.so]` (on a GPU node) compares the driver's
 exported entry points with SoftMig's hooks and exits non-zero if a memory,
 launch, meminfo or NVML process-query entry point is unhooked and not on the

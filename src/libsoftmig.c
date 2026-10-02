@@ -347,6 +347,7 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuGraphLaunch);
     DLSYM_HOOK_FUNC(cuGraphLaunch_ptsz);
     DLSYM_HOOK_FUNC(cuGraphAddMemAllocNode);
+    DLSYM_HOOK_FUNC(cuGraphAddMemFreeNode);
 #ifdef HOOK_MEMINFO_ENABLE
     DLSYM_HOOK_FUNC(cuMemGetInfo);
     DLSYM_HOOK_FUNC(cuMemGetInfo_v2);

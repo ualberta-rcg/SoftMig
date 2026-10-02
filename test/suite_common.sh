@@ -17,6 +17,10 @@ SOFTMIG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export SOFTMIG_ROOT
 mkdir -p "$OUT"
 
+# grep -c prints "0" AND exits 1 on no match, so `grep -c ... || echo 0`
+# yields "0\n0" and breaks numeric tests. Always use this instead.
+_grepc() { local c; c=$(grep -c "$@" 2>/dev/null); echo "${c:-0}"; }
+
 _emit() {
     local jobid="$1" status="$2" metric="$3" detail="$4"
     # A watchdog that fired overrides whatever the suite concluded.

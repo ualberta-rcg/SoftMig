@@ -123,6 +123,16 @@ for s in stress fault frameworks fork multigpu array security container overhead
     CUDA_VER=12.6 SLICE=$sl run_suite "test/suite_${s}.sh" "$ROOT/oneoff/${s}"
 done
 
+# 2.06 pressure/share one-offs (node-side sampler, multi-job): one scenario
+# each here; the full set is test/run_sets.sh.
+echo "  [share S1 / passthrough P1 / mixed M1 / gpuburn B1 / bypass on cuda/12.6]"
+CUDA_VER=12.6 SLICE=mixed  SCENARIO=S1 SHARE_ROTATE=1 run_suite "test/suite_share.sh"        "$ROOT/oneoff/share_S1"
+CUDA_VER=12.6 SLICE=mixed  SCENARIO=P1 run_suite "test/suite_passthrough.sh"  "$ROOT/oneoff/passthrough_P1"
+CUDA_VER=12.6 SLICE=mixed  SCENARIO=M1 run_suite "test/suite_mixed_pieces.sh" "$ROOT/oneoff/mixed_pieces_M1"
+CUDA_VER=12.6 SLICE=mixed  SCENARIO=B1 run_suite "test/suite_gpuburn.sh"      "$ROOT/oneoff/gpuburn_B1"
+CUDA_VER=12.6 SLICE=l40s.4 run_suite "test/suite_bypass.sh"    "$ROOT/oneoff/bypass_q"
+CUDA_VER=12.6 SLICE=l40s.4 SOFTMIG_TEST_SUDO=1 run_suite "test/suite_isolation.sh" "$ROOT/oneoff/isolation"
+
 echo
 echo "End: $(date)"
 echo

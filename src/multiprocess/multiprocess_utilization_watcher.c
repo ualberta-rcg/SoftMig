@@ -51,6 +51,63 @@ static volatile long g_total_cuda_cores = 0;
 extern int pidfound;
 int cuda_to_nvml_map_array[CUDA_DEVICE_MAX_COUNT];
 
+/*
+ * Duty-cycle throttle (complements the token bucket).
+ *
+ * The token bucket charges a launch by its grid size, so a workload made of
+ * a few long kernels (cuBLAS GEMMs in gpu-burn, big convolutions) can sit at
+ * ~100% SM while the pool never empties. When the watcher sees the job above
+ * its SM limit for ~1 s although tokens are still available, every launch is
+ * additionally delayed by g_launch_delay_us; the delay grows multiplicatively
+ * while the job stays over the limit and decays once it is at or below it.
+ * SOFTMIG_SM_DUTY_THROTTLE=0 disables it.
+ */
+static volatile long g_launch_delay_us = 0;
+static int g_over_cycles = 0;
+static int g_duty_throttle_enabled = 1;
+#define DUTY_DELAY_MIN_US      200L
+#define DUTY_DELAY_START_US    2000L
+#define DUTY_DELAY_MAX_US      250000L
+#define DUTY_ENGAGE_CYCLES     8        /* ~1 s of 120 ms cycles above the limit */
+#define DUTY_SLACK_PCT         3
+
+/* NVML process utilization is a ~1 s trailing average, so the controller
+ * moves gently per 120 ms cycle: x1.1 (x1.2 when far over) above the band,
+ * hold inside limit +/- slack, x0.93 below the band. */
+static void duty_throttle_update(int upper_limit, int util) {
+    if (!g_duty_throttle_enabled) return;
+    long d = g_launch_delay_us;
+    if (util > upper_limit + DUTY_SLACK_PCT) {
+        if (++g_over_cycles >= DUTY_ENGAGE_CYCLES || d > 0) {
+            if (d == 0) d = DUTY_DELAY_START_US;
+            else if (util > upper_limit + 25) d = d * 6 / 5;
+            else d = d * 11 / 10;
+            if (d > DUTY_DELAY_MAX_US) d = DUTY_DELAY_MAX_US;
+            if (g_launch_delay_us == 0)
+                LOG_DEBUG("duty_throttle: engaging (util=%d%% limit=%d%% tokens=%ld)", util, upper_limit, g_cur_cuda_cores);
+        }
+    } else if (util < upper_limit - DUTY_SLACK_PCT) {
+        g_over_cycles = 0;
+        if (d > 0) {
+            d = d * 93 / 100;
+            if (d < DUTY_DELAY_MIN_US) {
+                d = 0;
+                LOG_DEBUG("duty_throttle: released (util=%d%% limit=%d%%)", util, upper_limit);
+            }
+        }
+    } else {
+        g_over_cycles = 0;   /* inside the band: hold */
+    }
+    g_launch_delay_us = d;
+}
+
+static void duty_throttle_wait(void) {
+    long d = g_launch_delay_us;
+    if (d <= 0) return;
+    struct timespec ts = { .tv_sec = d / 1000000L, .tv_nsec = (d % 1000000L) * 1000L };
+    nanosleep(&ts, NULL);
+}
+
 void rate_limiter(int grids, int blocks) {
   long before_cuda_cores = 0;
   long after_cuda_cores = 0;
@@ -83,6 +140,7 @@ CHECK:
       }
     } while (!CAS(&g_cur_cuda_cores, before_cuda_cores, after_cuda_cores));
   //}
+  duty_throttle_wait();
 }
 
 static void change_token(long delta) {
@@ -222,6 +280,9 @@ int get_used_gpu_utilization(int *userutil) {
           }
         }
       }
+      /* A cycle without samples (idle job, or NVML_ERROR_NOT_FOUND) counts as
+       * 0%: it must refill, otherwise a process blocked in rate_limiter with
+       * a negative pool would never be released. */
       userutil[cudadev] = sum;
     }
     unlock_shrreg();
@@ -270,20 +331,21 @@ void* utilization_watcher() {
         if ((userutil[0]<=100) && (userutil[0]>=0)){
           share = delta(upper_limit, userutil[0], share);
           change_token(share);
+          duty_throttle_update(upper_limit, userutil[0]);
         }
         // Log utilization info every ~5 seconds (42 iterations = 5.04 seconds) - INFO level for console (level >= 3)
         static unsigned int util_log_counter = 0;
         if (++util_log_counter >= MEMORY_CHECK_INTERVAL) {
           util_log_counter = 0;
-          LOG_INFO("utilization_watcher[5s]: userutil=%d%% currentcores=%ld total=%ld limit=%d%% share=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share);
+          LOG_INFO("utilization_watcher[5s]: userutil=%d%% currentcores=%ld total=%ld limit=%d%% share=%ld delay_us=%ld",userutil[0],g_cur_cuda_cores,g_total_cuda_cores,upper_limit,share,g_launch_delay_us);
         }
         
         // Memory monitoring: check every ~5 seconds
         memory_check_counter++;
         if (memory_check_counter >= MEMORY_CHECK_INTERVAL) {
             memory_check_counter = 0;
-            LOG_FILE_DEBUG("utilization_watcher[5s]: Starting memory check cycle - userutil[0]=%d%% currentcores=%ld share=%ld", 
-                    userutil[0], g_cur_cuda_cores, share);
+            LOG_FILE_DEBUG("utilization_watcher[5s]: Starting memory check cycle - userutil[0]=%d%% currentcores=%ld share=%ld delay_us=%ld", 
+                    userutil[0], g_cur_cuda_cores, share, g_launch_delay_us);
             
             // Only check memory if softmig is enabled and memory limits are configured
             // Check if CUDA_DEVICE_MEMORY_LIMIT is set (similar to how SM limit is checked)
@@ -385,6 +447,11 @@ void init_utilization_watcher() {
         return;
     }
     setspec();
+    const char *dt = getenv("SOFTMIG_SM_DUTY_THROTTLE");
+    if (dt != NULL && dt[0] == '0') {
+        g_duty_throttle_enabled = 0;
+        LOG_DEBUG("init_utilization_watcher: duty-cycle throttle disabled by env");
+    }
     pthread_t tid;
     pthread_create(&tid, NULL, utilization_watcher, NULL);
     return;

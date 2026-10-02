@@ -5,6 +5,32 @@ For deployment and usage instructions, see `README.md`.
 
 ---
 
+## 2026-10-02 — branch `2.07`
+
+Branched from `2.06` (`217d322`). That branch is unchanged.
+
+This is the pressure-campaign follow-up: SM enforcement for workloads that never go through `cuLaunchKernel`, plus the suites that measure sets of jobs against what root sees on the node. It is **not** the library installed on rack01-11. The node is still `40fba696` (built from this worktree at 23:30 MDT on Oct 1). That build has the array/graph tracking and the duty-cycle throttle below. It does not have the memset and device-copy charge. That charge is in this branch and has not been deployed or re-run.
+
+### What the Oct 1–2 campaign measured (lib `40fba696`)
+
+Suites judge each job against root `nvidia-smi pmon`, `--query-compute-apps`, and `/proc/<pid>/cgroup`.
+
+- **Array, mipmapped-array and graph allocation nodes were only checked, not tracked.** A tight `cuArrayCreate` loop ran 1.5x past the limit. They now use the same reserve, driver call, commit path as `cuMemCreate`, and the destroy calls release the chunk. `cuGraphAddMemAllocNode` tracks `nodeParams->dptr`; `cuGraphAddMemFreeNode` releases it. On `40fba696`, every allocation API was `CAPPED` on a quarter and `PASSTHROUGH` on a whole GPU (21/21).
+- **Long cuBLAS kernels escaped the SM limit.** The token bucket charges per launch, so real `gpu_burn` ran at 88% of the card on a 25% slice. The utilization watcher now adds a duty-cycle throttle: measured SM more than 3 points over the limit for 8 cycles (~1 s) delays every later launch (2 ms start, x1.1/x1.2 growth, 250 ms cap, x0.93 decay). On `40fba696`, `gpu_burn` on a quarter measured about 25% (lite burner about 23%). `SOFTMIG_SM_DUTY_THROTTLE=0` disables it.
+- **Four quarter burn jobs on one GPU each stayed inside the quarter** (S3): 23.3, 21.5, 21.6, 21.3% SM, 6426/11517 MiB each. A whole GPU next to a quarter stayed a whole GPU (~98% SM, view 46068 MiB) while the quarter stayed capped.
+- **`stress_alloc` on a quarter used 71% SM** (G6, mean; the four processes in that one job were 22, 19, 25 and 33%). Memory stayed at 3704/11517 MiB. Only two of the four quarters on that GPU had a job: this one and a lite burner at 27%. The 71% filled the two empty quarters. It did not push the burner below its cap. `cuMemset` and device-to-device copies run as driver kernels and never entered `rate_limiter` in `40fba696`. 2.05 has the same hole: those wrappers do not call `rate_limiter` there either.
+- **`nvidia-smi` 595.91.07 shows other jobs' processes.** It reads them through `nvmlInternalGetExportTable`, which bypasses the NVML symbols SoftMig hooks. Suites report that as `LEAK`. `nvidia-smi-hook.sh` filters `pmon` and the default table as well as `--query-compute-apps`. With the wrapper on `PATH`, W1 passed.
+
+### Not yet measured (this branch only)
+
+`cuMemsetD*`, `cuMemsetD2D*`, `cuMemcpyDtoD*` and `cuMemcpyPeer*` now call the rate limiter (1 token per MiB) and take the duty delay, the same as a launch. This is the response to G6. No job has loaded this build.
+
+### Tests
+
+Pressure-campaign suites, new on this branch: `test/share_lib.sh`, `test/share_report.py`, `test/node_sampler.sh`, `test/suite_share.sh` (S1–S7, G1–G6, W1), `test/suite_passthrough.sh` (P1–P4), `test/suite_mixed_pieces.sh` (M1–M6), `test/suite_gpuburn.sh` (B1–B5), `test/suite_isolation.sh`, `test/suite_bypass.sh`, `test/suite_storm.sh`. Drivers: `test/run_sets.sh`, `test/run_overnight.sh`, `test/overnight_driver.sh`, `test/sets_summary.py`. The root sampler is started with `sudo ssh` and shared for a campaign (`SAMPLER_SHARED`).
+
+---
+
 ## 2026-10-01 — branch `2.06`
 
 ### Shared-region lock: robust mutex, nobody gets robbed

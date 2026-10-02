@@ -191,6 +191,7 @@ cuda_entry_t cuda_library_entry[] = {
     {.name = "cuMemFreeAsync_ptsz"},
     {.name = "cuMemAllocFromPoolAsync_ptsz"},
     {.name = "cuGraphAddMemAllocNode"},
+    {.name = "cuGraphAddMemFreeNode"},
 };
 
 _Static_assert(sizeof(cuda_library_entry) / sizeof(cuda_library_entry[0]) == CUDA_ENTRY_END,
@@ -282,7 +283,7 @@ void softmig_ensure_cuda_table(void) {
  */
 static const char *const unhooked_watch[] = {
     "cuMemAlloc", "cuMemCreate", "cuMemFree", "cuArrayCreate", "cuArray3DCreate",
-    "cuMipmappedArrayCreate", "cuLaunch", "cuGraphLaunch", "cuGraphAddMemAllocNode",
+    "cuMipmappedArrayCreate", "cuLaunch", "cuGraphLaunch", "cuGraphAddMemAllocNode", "cuGraphAddMemFreeNode", "cuArrayDestroy", "cuMipmappedArrayDestroy",
     "cuMemGetInfo", "cuDeviceTotalMem",
     "nvmlDeviceGetComputeRunningProcesses", "nvmlDeviceGetGraphicsRunningProcesses",
     "nvmlDeviceGetMPSComputeRunningProcesses", "nvmlDeviceGetMemoryInfo",

@@ -85,6 +85,7 @@ const size_t cuarray_format_bytes[33] = {
 
 extern size_t round_up(size_t size,size_t align);
 extern void rate_limiter(int grids, int blocks);
+static void softmig_throttle_devcopy(size_t bytes);
 
 int check_oom() {
     CUdevice dev;
@@ -131,15 +132,28 @@ uint64_t compute_array_alloc_bytes(const CUDA_ARRAY_DESCRIPTOR* desc) {
     return bytes;
 }
 
+/*
+ * Arrays are tracked like cuMemCreate handles (reserve -> driver call ->
+ * commit, keyed by the CUarray handle). A check-only oom_check() here was not
+ * enough: arrays never went through add_chunk, so the NVML-usage side of the
+ * check saw a cached value that only tracked allocations refreshed, and a
+ * tight cuArrayCreate loop ran 1.5x past the limit (bypass suite, 2.06).
+ */
 CUresult cuArray3DCreate_v2(CUarray* arr, const CUDA_ARRAY3D_DESCRIPTOR* desc) {
     LOG_DEBUG("cuArray3DCreate_v2");
     uint64_t bytes = compute_3d_array_alloc_bytes(desc);
     ENSURE_RUNNING();
     SOFTMIG_MEM_GUARD(dev, cuArray3DCreate_v2, arr, desc);
-    if (oom_check(dev, bytes)) {
+    if (softmig_reserve(dev, bytes)) {
+        LOG_ERROR("cuArray3DCreate_v2: Device %d OOM (array of %llu bytes)", dev, (unsigned long long)bytes);
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuArray3DCreate_v2, arr, desc);
+    if (res == CUDA_SUCCESS) {
+        add_chunk_only((CUdeviceptr)(uintptr_t)*arr, bytes);
+    } else {
+        softmig_unreserve(dev, bytes);
+    }
     return res;
 }
 
@@ -149,21 +163,27 @@ CUresult cuArrayCreate_v2(CUarray* arr, const CUDA_ARRAY_DESCRIPTOR* desc) {
     uint64_t bytes = compute_array_alloc_bytes(desc);
     ENSURE_RUNNING();
     SOFTMIG_MEM_GUARD(dev, cuArrayCreate_v2, arr, desc);
-    if (oom_check(dev, bytes)) {
+    if (softmig_reserve(dev, bytes)) {
+        LOG_ERROR("cuArrayCreate_v2: Device %d OOM (array of %llu bytes)", dev, (unsigned long long)bytes);
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuArrayCreate_v2, arr, desc);
+    if (res == CUDA_SUCCESS) {
+        add_chunk_only((CUdeviceptr)(uintptr_t)*arr, bytes);
+    } else {
+        softmig_unreserve(dev, bytes);
+    }
     return res;
 }
 
 
 CUresult cuArrayDestroy(CUarray arr) {
-    CUDA_ARRAY3D_DESCRIPTOR desc;
-    LOG_DEBUG("cuArrayDestory");
-    CHECK_DRV_API(cuArray3DGetDescriptor(&desc, arr));
-    /*uint64_t bytes*/
-    compute_3d_array_alloc_bytes(&desc);
+    LOG_DEBUG("cuArrayDestroy");
+    SOFTMIG_MEM_GUARD(dev, cuArrayDestroy, arr);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuArrayDestroy, arr);
+    if (res == CUDA_SUCCESS) {
+        remove_chunk_only((CUdeviceptr)(uintptr_t)arr);   // -1 for arrays created before tracking: harmless
+    }
     return res;
 }
 
@@ -363,13 +383,17 @@ CUresult cuMemcpyDtoA_v2 ( CUarray dstArray, size_t dstOffset, CUdeviceptr srcDe
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpyDtoA_v2,dstArray,dstOffset,srcDevice,ByteCount);
 }
 
-CUresult cuMemcpyDtoD_v2 ( CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount ){
+CUresult cuMemcpyDtoD_v2( CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemcpyDtoD_v2,dstDevice,srcDevice,ByteCount);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(ByteCount);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpyDtoD_v2,dstDevice,srcDevice,ByteCount);
 }
 
-CUresult cuMemcpyDtoDAsync_v2( CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream ){
+CUresult cuMemcpyDtoDAsync_v2( CUdeviceptr dstDevice, CUdeviceptr srcDevice, size_t ByteCount, CUstream hStream ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemcpyDtoDAsync_v2,dstDevice,srcDevice,ByteCount,hStream);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(ByteCount);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpyDtoDAsync_v2,dstDevice,srcDevice,ByteCount,hStream);
 }
 
@@ -399,78 +423,106 @@ CUresult cuMemcpyHtoDAsync_v2( CUdeviceptr dstDevice, const void* srcHost, size_
 
 
 CUresult cuMemcpyPeer(CUdeviceptr dstDevice, CUcontext dstContext, CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemcpyPeer,dstDevice,dstContext,srcDevice,srcContext,ByteCount);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(ByteCount);
     CUresult res=CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpyPeer,dstDevice,dstContext,srcDevice,srcContext,ByteCount);
     return res;
 }
 
-CUresult cuMemcpyPeerAsync ( CUdeviceptr dstDevice, CUcontext dstContext, CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount, CUstream hStream){
+CUresult cuMemcpyPeerAsync( CUdeviceptr dstDevice, CUcontext dstContext, CUdeviceptr srcDevice, CUcontext srcContext, size_t ByteCount, CUstream hStream) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemcpyPeerAsync,dstDevice,dstContext,srcDevice,srcContext,ByteCount,hStream);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(ByteCount);
     CUresult res=CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemcpyPeerAsync,dstDevice,dstContext,srcDevice,srcContext,ByteCount,hStream);
     return res;
 }
 
-CUresult cuMemsetD16_v2 ( CUdeviceptr dstDevice, unsigned short us, size_t N ){
+CUresult cuMemsetD16_v2( CUdeviceptr dstDevice, unsigned short us, size_t N ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD16_v2,dstDevice,us,N);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(N);
     CUresult res=CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD16_v2,dstDevice,us,N);
     return res;
 }
 
-CUresult cuMemsetD16Async ( CUdeviceptr dstDevice, unsigned short us, size_t N, CUstream hStream ){
+CUresult cuMemsetD16Async( CUdeviceptr dstDevice, unsigned short us, size_t N, CUstream hStream ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD16Async,dstDevice,us,N,hStream);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(N);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD16Async,dstDevice,us,N,hStream);
 }
 
-CUresult cuMemsetD2D16_v2 ( CUdeviceptr dstDevice, size_t dstPitch, unsigned short us, size_t Width, size_t Height ){
+CUresult cuMemsetD2D16_v2( CUdeviceptr dstDevice, size_t dstPitch, unsigned short us, size_t Width, size_t Height ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD2D16_v2,dstDevice,dstPitch,us,Width,Height);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy((size_t)dstPitch * Height);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD2D16_v2,dstDevice,dstPitch,us,Width,Height);
 }
 
-CUresult cuMemsetD2D16Async (CUdeviceptr dstDevice, size_t dstPitch, unsigned short us, size_t Width, size_t Height, CUstream hStream ){
+CUresult cuMemsetD2D16Async(CUdeviceptr dstDevice, size_t dstPitch, unsigned short us, size_t Width, size_t Height, CUstream hStream ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD2D16Async,dstDevice,dstPitch,us,Width,Height,hStream);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy((size_t)dstPitch * Height);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD2D16Async,dstDevice,dstPitch,us,Width,Height,hStream);
 }
 
-CUresult cuMemsetD2D32_v2 ( CUdeviceptr dstDevice, size_t dstPitch, unsigned int  ui, size_t Width, size_t Height ){
+CUresult cuMemsetD2D32_v2( CUdeviceptr dstDevice, size_t dstPitch, unsigned int  ui, size_t Width, size_t Height ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD2D32_v2,dstDevice,dstPitch,ui,Width,Height);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy((size_t)dstPitch * Height);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD2D32_v2,dstDevice,dstPitch,ui,Width,Height);
 }
 
 
-CUresult cuMemsetD2D32Async ( CUdeviceptr dstDevice, size_t dstPitch, unsigned int  ui, size_t Width, size_t Height, CUstream hStream ){
+CUresult cuMemsetD2D32Async( CUdeviceptr dstDevice, size_t dstPitch, unsigned int  ui, size_t Width, size_t Height, CUstream hStream ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD2D32Async,dstDevice,dstPitch,ui,Width,Height,hStream);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy((size_t)dstPitch * Height);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD2D32Async,dstDevice,dstPitch,ui,Width,Height,hStream);
 }
 
-CUresult cuMemsetD2D8_v2 ( CUdeviceptr dstDevice, size_t dstPitch, unsigned char  uc, size_t Width, size_t Height ){
+CUresult cuMemsetD2D8_v2( CUdeviceptr dstDevice, size_t dstPitch, unsigned char  uc, size_t Width, size_t Height ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD2D8_v2,dstDevice,dstPitch,uc,Width,Height);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy((size_t)dstPitch * Height);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD2D8_v2,dstDevice,dstPitch,uc,Width,Height);
 }
 
-CUresult cuMemsetD2D8Async ( CUdeviceptr dstDevice, size_t dstPitch, unsigned char  uc, size_t Width, size_t Height, CUstream hStream ){
+CUresult cuMemsetD2D8Async( CUdeviceptr dstDevice, size_t dstPitch, unsigned char  uc, size_t Width, size_t Height, CUstream hStream ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD2D8Async,dstDevice,dstPitch,uc,Width,Height,hStream);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy((size_t)dstPitch * Height);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD2D8Async,dstDevice,dstPitch,uc,Width,Height,hStream);
 }
 
-CUresult cuMemsetD32_v2 ( CUdeviceptr dstDevice, unsigned int  ui, size_t N ){
+CUresult cuMemsetD32_v2( CUdeviceptr dstDevice, unsigned int  ui, size_t N ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD32_v2,dstDevice,ui,N);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(N);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD32_v2,dstDevice,ui,N);
     return res;
 }
 
-CUresult cuMemsetD32Async ( CUdeviceptr dstDevice, unsigned int  ui, size_t N, CUstream hStream ){
+CUresult cuMemsetD32Async( CUdeviceptr dstDevice, unsigned int  ui, size_t N, CUstream hStream ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD32Async,dstDevice,ui,N,hStream);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(N);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD32Async,dstDevice,ui,N,hStream);
 }   
 
 
-CUresult cuMemsetD8_v2 ( CUdeviceptr dstDevice, unsigned char  uc, size_t N ){
+CUresult cuMemsetD8_v2( CUdeviceptr dstDevice, unsigned char  uc, size_t N ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD8_v2,dstDevice,uc,N);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(N);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD8_v2,dstDevice,uc,N);
 }
 
-CUresult cuMemsetD8Async ( CUdeviceptr dstDevice, unsigned char  uc, size_t N, CUstream hStream ){
+CUresult cuMemsetD8Async( CUdeviceptr dstDevice, unsigned char  uc, size_t N, CUstream hStream ) {
+    SOFTMIG_PASSIVE_FORWARD(cuMemsetD8Async,dstDevice,uc,N,hStream);
     ENSURE_RUNNING();
+    softmig_throttle_devcopy(N);
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemsetD8Async,dstDevice,uc,N,hStream);
 }
 
@@ -525,21 +577,32 @@ CUresult cuMipmappedArrayCreate(CUmipmappedArray* pHandle,
                                           const CUDA_ARRAY3D_DESCRIPTOR* pMipmappedArrayDesc, 
                                           unsigned int numMipmapLevels) {
     LOG_DEBUG("cuMipmappedArrayCreate\n");
+    ENSURE_RUNNING();
     SOFTMIG_MEM_GUARD(dev, cuMipmappedArrayCreate, pHandle, pMipmappedArrayDesc, numMipmapLevels);
-    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMipmappedArrayCreate, pHandle, pMipmappedArrayDesc, numMipmapLevels);
-    if (res != CUDA_SUCCESS) {
-        return res;
-    }
-    if (check_oom()) {
-        CUDA_OVERRIDE_CALL(cuda_library_entry,cuMipmappedArrayDestroy, *pHandle);
+    // Level 0 plus the geometric tail of the mip chain (< 1/7 of level 0 for 3D,
+    // < 1/3 for 2D); use 4/3 as a conservative upper bound.
+    uint64_t bytes = compute_3d_array_alloc_bytes(pMipmappedArrayDesc);
+    if (numMipmapLevels > 1) bytes += bytes / 3;
+    if (softmig_reserve(dev, bytes)) {
+        LOG_ERROR("cuMipmappedArrayCreate: Device %d OOM (array of %llu bytes)", dev, (unsigned long long)bytes);
         return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMipmappedArrayCreate, pHandle, pMipmappedArrayDesc, numMipmapLevels);
+    if (res == CUDA_SUCCESS) {
+        add_chunk_only((CUdeviceptr)(uintptr_t)*pHandle, bytes);
+    } else {
+        softmig_unreserve(dev, bytes);
     }
     return res;
 }
 
 CUresult cuMipmappedArrayDestroy(CUmipmappedArray hMipmappedArray) {
-    LOG_DEBUG("cuMipmappedArrayDestory\n");
+    LOG_DEBUG("cuMipmappedArrayDestroy\n");
+    SOFTMIG_MEM_GUARD(dev, cuMipmappedArrayDestroy, hMipmappedArray);
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMipmappedArrayDestroy, hMipmappedArray);
+    if (res == CUDA_SUCCESS) {
+        remove_chunk_only((CUdeviceptr)(uintptr_t)hMipmappedArray);
+    }
     return res;
 }
 
@@ -549,6 +612,17 @@ static inline void softmig_before_launch(unsigned int gx, unsigned int gy, unsig
     pre_launch_kernel();
     if (pidfound==1){
         rate_limiter(gx * gy * gz, bx * by * bz);
+    }
+}
+
+/* Device-side memsets and device-to-device copies run as driver-internal
+ * kernels that never pass through cuLaunchKernel, so a job made of them
+ * (allocation storms zeroing buffers, memset loops) escaped the SM limit.
+ * Charge them like a launch: tokens by size (1 per MiB) plus the duty delay. */
+static void softmig_throttle_devcopy(size_t bytes) {
+    if (softmig_is_passive()) return;
+    if (pidfound == 1) {
+        rate_limiter((int)((bytes >> 20) + 1), 0);
     }
 }
 
@@ -718,9 +792,14 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize, CUmemoryPoo
 
 /*
  * Graph memory nodes allocate when the graph is launched, from a graph pool
- * the driver manages. Check only: refuse a node whose size alone would put
- * the job over its limit now. It is not tracked (no free hook pairs with it);
- * NVML usage sees the memory once the graph runs. Allocation nodes created
+ * the driver manages. The node is reserved and then tracked by the virtual
+ * address the driver assigns (nodeParams->dptr), so the limit check counts it
+ * before the graph ever runs; a plain check-only version let a loop of alloc
+ * nodes run ~1.2 GiB past the limit (bypass suite, 2.06) because nothing
+ * refreshed the usage between nodes. The address is released from tracking by
+ * cuMemFree(dptr) (tracked path) or a cuGraphAddMemFreeNode for it. Memory
+ * freed only by destroying the executable graph stays counted until the
+ * process exits: conservative, never under-counts. Allocation nodes created
  * implicitly by stream capture (cudaMallocAsync while capturing) do not pass
  * through here.
  */
@@ -728,12 +807,32 @@ CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph, const 
                                 size_t numDependencies, CUDA_MEM_ALLOC_NODE_PARAMS *nodeParams) {
     ENSURE_RUNNING();
     SOFTMIG_MEM_GUARD(dev, cuGraphAddMemAllocNode, phGraphNode, hGraph, dependencies, numDependencies, nodeParams);
-    if (nodeParams != NULL && oom_check(dev, nodeParams->bytesize)) {
-        LOG_ERROR("cuGraphAddMemAllocNode: Device %d OOM (node of %zu bytes)", dev, nodeParams->bytesize);
+    size_t bytes = nodeParams ? nodeParams->bytesize : 0;
+    if (bytes && softmig_reserve(dev, bytes)) {
+        LOG_ERROR("cuGraphAddMemAllocNode: Device %d OOM (node of %zu bytes)", dev, bytes);
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
-    return CUDA_OVERRIDE_CALL(cuda_library_entry, cuGraphAddMemAllocNode, phGraphNode, hGraph, dependencies,
-                              numDependencies, nodeParams);
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry, cuGraphAddMemAllocNode, phGraphNode, hGraph, dependencies,
+                                      numDependencies, nodeParams);
+    if (bytes) {
+        if (res == CUDA_SUCCESS && nodeParams->dptr) {
+            add_chunk_only(nodeParams->dptr, bytes);
+        } else {
+            softmig_unreserve(dev, bytes);
+        }
+    }
+    return res;
+}
+
+CUresult cuGraphAddMemFreeNode(CUgraphNode *phGraphNode, CUgraph hGraph, const CUgraphNode *dependencies,
+                               size_t numDependencies, CUdeviceptr dptr) {
+    SOFTMIG_MEM_GUARD(dev, cuGraphAddMemFreeNode, phGraphNode, hGraph, dependencies, numDependencies, dptr);
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry, cuGraphAddMemFreeNode, phGraphNode, hGraph, dependencies,
+                                      numDependencies, dptr);
+    if (res == CUDA_SUCCESS) {
+        remove_chunk_only(dptr);
+    }
+    return res;
 }
 
 CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream) {

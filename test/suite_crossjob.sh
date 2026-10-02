@@ -120,14 +120,15 @@ if [ -z "$uuidA" ] || [ -z "$uuidB" ] || [ "$uuidA" != "$uuidB" ]; then
 fi
 
 # Same GPU: SoftMig must not register the other PID as current, and must
-# have skipped it in the NVML filter. nvidia-smi may still list both PIDs
-# unless nvidia-smi-hook.sh is on PATH — driver 595 nvidia-smi can bypass
-# dlsym via NVML's export table, so smi leak alone is not a FAIL.
+# have skipped it in the NVML filter (accounting isolation). nvidia-smi 595
+# fetches its process list through NVML's private export table, so it can
+# still list both PIDs unless nvidia-smi-hook.sh is on PATH: that is reported
+# as LEAK (visibility only), never silently as PASS.
 if [ "$crossA_regs_B" != "0" ] || [ "$crossB_regs_A" != "0" ]; then
     _emit "${jidA},${jidB}" FAIL "leak" "$metric"
+elif [ "$A_saw_B" != "0" ] || [ "$B_saw_A" != "0" ]; then
+    _emit "${jidA},${jidB}" LEAK "visible" "accounting isolated, nvidia-smi shows other job: $metric"
 elif [ "$A_skipped_B" != "0" ] && [ "$B_skipped_A" != "0" ]; then
-    _emit "${jidA},${jidB}" PASS "isolated" "$metric"
-elif [ "$A_saw_B" = "0" ] && [ "$B_saw_A" = "0" ]; then
     _emit "${jidA},${jidB}" PASS "isolated" "$metric"
 else
     _emit "${jidA},${jidB}" PARTIAL 0 "overlap but no skip logs: $metric"

@@ -232,6 +232,7 @@ typedef enum {
     CUDA_OVERRIDE_ENUM(cuMemFreeAsync_ptsz),
     CUDA_OVERRIDE_ENUM(cuMemAllocFromPoolAsync_ptsz),
     CUDA_OVERRIDE_ENUM(cuGraphAddMemAllocNode),
+    CUDA_OVERRIDE_ENUM(cuGraphAddMemFreeNode),
     CUDA_ENTRY_END
 }cuda_override_enum_t;
 
