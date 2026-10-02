@@ -10,14 +10,16 @@ SUITE=direct
 DEFAULT_SRUN_TIME=00:10:00
 . "$(dirname "$0")/suite_common.sh"
 
-srun --reservation=softmig ${SRUN_EXTRA:-} --gres=gpu:${SLICE}:1 --cpus-per-task=8 --mem=8G \
+_srun_capture srun --reservation=softmig ${SRUN_EXTRA:-} --gres=gpu:${SLICE}:1 --cpus-per-task=8 --mem=8G \
      --time="$DEFAULT_SRUN_TIME" bash -lc "
 module load cuda/${CUDA_VER}
 cd ${SOFTMIG_ROOT}
 export SOFTMIG_LOG_LEVEL=5
-N=4 MB=384 HOLD=12 OUT='${OUT}' test/run_multiproc.sh >/dev/null 2>&1
-_copy_softmig_log \$SLURM_JOB_ID '${OUT}/softmig.log'
 echo \$SLURM_JOB_ID > '${OUT}/jid.txt'
+_hang_watchdog 300 '${OUT}'
+N=4 MB=384 HOLD=12 OUT='${OUT}' test/run_multiproc.sh >/dev/null 2>&1
+_hang_disarm '${OUT}'
+_copy_softmig_log \$SLURM_JOB_ID '${OUT}/softmig.log'
 " >/dev/null 2>&1
 
 jid=$(cat "$OUT/jid.txt" 2>/dev/null || echo NA)

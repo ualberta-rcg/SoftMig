@@ -198,12 +198,14 @@ CUresult cuMemAllocManaged(CUdeviceptr* dptr, size_t bytesize, unsigned int flag
     LOG_DEBUG("cuMemAllocManaged dptr=%p bytesize=%ld",dptr,bytesize);
     ENSURE_RUNNING();
     SOFTMIG_MEM_GUARD(dev, cuMemAllocManaged, dptr, bytesize, flags);
-    if (oom_check(dev,bytesize)){
+    if (softmig_reserve(dev,bytesize)){
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocManaged, dptr, bytesize, flags);
     if (res == CUDA_SUCCESS) {
         add_chunk_only(*dptr,bytesize);
+    } else {
+        softmig_unreserve(dev,bytesize);
     }
     return res;
 }
@@ -215,12 +217,14 @@ CUresult cuMemAllocPitch_v2(CUdeviceptr* dptr, size_t* pPitch, size_t WidthInByt
     size_t bytesize = guess_pitch * Height;
     ENSURE_RUNNING();
     SOFTMIG_MEM_GUARD(dev, cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
-    if (oom_check(dev,bytesize)){
+    if (softmig_reserve(dev,bytesize)){
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocPitch_v2, dptr, pPitch, WidthInBytes, Height, ElementSizeBytes);
     if (res == CUDA_SUCCESS) {
         add_chunk_only(*dptr,bytesize);
+    } else {
+        softmig_unreserve(dev,bytesize);
     }
     return res;
 }
@@ -601,13 +605,15 @@ CUresult cuMemAddressReserve(CUdeviceptr* ptr, size_t size,
 CUresult cuMemCreate ( CUmemGenericAllocationHandle* handle, size_t size, const CUmemAllocationProp* prop, unsigned long long flags ) {
     ENSURE_RUNNING();
     SOFTMIG_MEM_GUARD(dev, cuMemCreate, handle, size, prop, flags);
-    if (oom_check(dev, size)) {
+    if (softmig_reserve(dev, size)) {
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,
         cuMemCreate, handle, size, prop, flags);
     if (res == CUDA_SUCCESS) {
         add_chunk_only(*handle, size);
+    } else {
+        softmig_unreserve(dev, size);
     }
     return res;
 }
@@ -697,15 +703,37 @@ CUresult cuMemPoolDestroy(CUmemoryPool pool) {
 
 CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream) {
     SOFTMIG_MEM_GUARD(dev, cuMemAllocFromPoolAsync, dptr, bytesize, pool, hStream);
-    if (oom_check(dev, bytesize)) {
+    if (softmig_reserve(dev, bytesize)) {
         LOG_ERROR("cuMemAllocFromPoolAsync: Device %d OOM (requested %lu bytes)", dev, bytesize);
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocFromPoolAsync,dptr,bytesize,pool,hStream);
     if (res == CUDA_SUCCESS) {
         add_chunk_async_only(*dptr, bytesize);
+    } else {
+        softmig_unreserve(dev, bytesize);
     }
     return res;
+}
+
+/*
+ * Graph memory nodes allocate when the graph is launched, from a graph pool
+ * the driver manages. Check only: refuse a node whose size alone would put
+ * the job over its limit now. It is not tracked (no free hook pairs with it);
+ * NVML usage sees the memory once the graph runs. Allocation nodes created
+ * implicitly by stream capture (cudaMallocAsync while capturing) do not pass
+ * through here.
+ */
+CUresult cuGraphAddMemAllocNode(CUgraphNode *phGraphNode, CUgraph hGraph, const CUgraphNode *dependencies,
+                                size_t numDependencies, CUDA_MEM_ALLOC_NODE_PARAMS *nodeParams) {
+    ENSURE_RUNNING();
+    SOFTMIG_MEM_GUARD(dev, cuGraphAddMemAllocNode, phGraphNode, hGraph, dependencies, numDependencies, nodeParams);
+    if (nodeParams != NULL && oom_check(dev, nodeParams->bytesize)) {
+        LOG_ERROR("cuGraphAddMemAllocNode: Device %d OOM (node of %zu bytes)", dev, nodeParams->bytesize);
+        return CUDA_ERROR_OUT_OF_MEMORY;
+    }
+    return CUDA_OVERRIDE_CALL(cuda_library_entry, cuGraphAddMemAllocNode, phGraphNode, hGraph, dependencies,
+                              numDependencies, nodeParams);
 }
 
 CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream) {

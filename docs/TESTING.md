@@ -70,6 +70,22 @@ alloc/free through the per-thread stream must work, and no shared region or
 signal handler may appear; in a slice job the same probe must see hooks.
 `test/jax_cuda_async.sh` is the JAX `cuda_async` end-to-end check.
 
+One-off suites added in 2.06 (run by `run_matrix.sh` on CUDA 12.6):
+`stress` (16/32/64 processes x 4 threads allocating concurrently, plus an
+enforcement round checked against real per-process NVML usage), `fault`
+(SIGKILL and SIGSTOP of workers while they contend for the region lock),
+`frameworks` (PyTorch native and cudaMallocAsync, TensorFlow, DataLoader
+fork and spawn; slice and full GPU; venv in `$SCRATCH/softmig-fwvenv`),
+`fork`, `multigpu`, `array`, `security`, `container` and `overhead`. The last
+two report `INFO`. `build/test/shrreg_check` validates a job's shared region.
+
+Every suite arms an in-job watchdog; a hang is reported as `HANG` with
+per-thread state in `OUT/hang_<pid>.txt`. Run the matrix with
+`SOFTMIG_HANG_GDB_SUDO=1` to also get root gdb stacks (`OUT/gdb_<pid>.txt`)
+from the reservation node, and with `SOFTMIG_TEST_SUDO=1` for the root-side
+`security` cases. All of this runs as jobs on the reservation; nothing is
+tested on the login node.
+
 `test/audit_hooks.sh [libsoftmig.so]` (on a GPU node) compares the driver's
 exported entry points with SoftMig's hooks and exits non-zero if a memory,
 launch, meminfo or NVML process-query entry point is unhooked and not on the

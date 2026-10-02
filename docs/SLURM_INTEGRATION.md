@@ -23,7 +23,7 @@ Example scripts are provided in `docs/examples/`:
 | `/etc/ld.so.preload` | system-wide load of `libsoftmig.so` |
 | `/var/run/softmig/{jobid}.conf` | per-job limit config (root-owned) |
 | `/var/run/softmig/{jobid}_{arrayid}.conf` | per-array-task config (root-owned) |
-| `$SLURM_TMPDIR/cudevshr.cache.{jobid}[.{arrayid}]` | per-job shared memory region for memory tracking |
+| `$SLURM_TMPDIR/cudevshr.cache.v{layout}.{jobid}[.{arrayid}]` | per-job shared memory region for memory tracking (layout version in the name) |
 | `$SLURM_TMPDIR/vgpulock/lock.{jobid}` | per-job serialization lock file |
 | `/var/log/softmig/{jobid}.log` or `{jobid}_{arrayid}.log` | per-job logs (admin-visible) |
 
@@ -94,7 +94,7 @@ See: `docs/examples/epilog_softmig.sh`.
 
 ## job_container/tmpfs
 
-With `JobContainerType=job_container/tmpfs` (and `PrologFlags=Contain`) each job gets a private `/tmp` and `/dev/shm`. SoftMig's shared region (`/tmp/cudevshr.cache.<jobid>`) is then per job by construction, so jobs sharing a GPU never see each other's region, and nothing needs to remove it in the prolog or epilog. Without job_container, keep the `cudevshr.cache` cleanup and make sure `/tmp` is not shared across users' jobs.
+With `JobContainerType=job_container/tmpfs` (and `PrologFlags=Contain`) each job gets a private `/tmp` and `/dev/shm`. SoftMig's shared region (`/tmp/cudevshr.cache.v2.<jobid>`) is then per job by construction, so jobs sharing a GPU never see each other's region, and nothing needs to remove it in the prolog or epilog. Without job_container, keep the `cudevshr.cache` cleanup and make sure `/tmp` is not shared across users' jobs.
 
 ## Optional: job_submit.lua
 

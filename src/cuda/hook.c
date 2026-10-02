@@ -190,6 +190,7 @@ cuda_entry_t cuda_library_entry[] = {
     {.name = "cuMemAllocAsync_ptsz"},
     {.name = "cuMemFreeAsync_ptsz"},
     {.name = "cuMemAllocFromPoolAsync_ptsz"},
+    {.name = "cuGraphAddMemAllocNode"},
 };
 
 _Static_assert(sizeof(cuda_library_entry) / sizeof(cuda_library_entry[0]) == CUDA_ENTRY_END,
@@ -292,7 +293,7 @@ static const char *const unhooked_watch[] = {
  * the deprecated multi-device cooperative launch, graph memory nodes, and
  * pinned host allocations (not device memory). */
 static const char *const unhooked_ack[] = {
-    "cuLaunchHostFunc", "cuLaunchCooperativeKernelMultiDevice", "cuGraphAddMemAllocNode",
+    "cuLaunchHostFunc", "cuLaunchCooperativeKernelMultiDevice",
     "cuMemAllocHost", "cuMemFreeHost", "cuMemAllocManaged_ptsz",
     NULL};
 /* Exact names: pre-CUDA-3.2 ABI (cuda.h maps these to _v2 since 3.2, and

@@ -319,7 +319,7 @@ void* utilization_watcher() {
                         if (usage == 0) {
                             // Fallback to tracked usage if NVML query failed
                             lock_shrreg();
-                            usage = get_gpu_memory_usage_nolock(cuda_dev);
+                            usage = get_gpu_memory_usage_nolock(cuda_to_nvml_map(cuda_dev));
                             unlock_shrreg();
                         }
                         

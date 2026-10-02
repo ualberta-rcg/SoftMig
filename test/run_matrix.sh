@@ -114,6 +114,15 @@ echo "  [nvsmi filter on l40s.4 cuda/12.2]"
 CUDA_VER=12.2 SLICE=l40s.4 \
   run_suite "test/suite_nvsmi.sh" "$ROOT/oneoff/nvsmi"
 
+# 2.06 one-offs (CUDA 12.6): concurrency, faults, frameworks, process models,
+# multi-GPU, arrays, config tampering, containers, overhead.
+for s in stress fault frameworks fork multigpu array security container overhead; do
+    sl=l40s.4
+    [ "$s" = stress ] && sl=l40s.2
+    echo "  [${s} on ${sl} cuda/12.6]"
+    CUDA_VER=12.6 SLICE=$sl run_suite "test/suite_${s}.sh" "$ROOT/oneoff/${s}"
+done
+
 echo
 echo "End: $(date)"
 echo

@@ -82,5 +82,5 @@ Notes:
 | `SOFTMIG_LOG_LEVEL` | Log verbosity | `0`=errors (default), `1`=+warnings, `2`=+debug, `3`=+info+console |
 | `SOFTMIG_LOG_FILE` | Override log file path | Overrides the default `/var/log/softmig/{jobid}.log` |
 | `SOFTMIG_LOCK_FILE` | Override lock file path | Overrides the default `$SLURM_TMPDIR/vgpulock/lock.{jobid}` |
-| `CUDA_DEVICE_MEMORY_SHARED_CACHE` | Override shared cache path | Overrides the default `$SLURM_TMPDIR/cudevshr.cache.{jobid}` |
+| `CUDA_DEVICE_MEMORY_SHARED_CACHE` | Override shared cache path | Overrides the default `$SLURM_TMPDIR/cudevshr.cache.v{layout}.{jobid}` |
 

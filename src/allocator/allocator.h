@@ -105,6 +105,12 @@ extern pthread_mutex_t mutex;
  */
 int oom_check(const int dev,size_t addon);
 
+/** Admit size bytes on CUDA device dev against the limit and hold them as
+ *  pending until committed (add_chunk_only / add_chunk_async_only) or
+ *  released (softmig_unreserve). Returns 0 if admitted, 1 if over the limit. */
+int softmig_reserve(int dev, size_t size);
+void softmig_unreserve(int dev, size_t size);
+
 /** Allocate GPU memory with OOM check; thread-safe. Returns CUDA error code. */
 int allocate_raw(CUdeviceptr *dptr, size_t size);
 

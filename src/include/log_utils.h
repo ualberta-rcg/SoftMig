@@ -22,6 +22,13 @@
 
 extern FILE *fp1;
 
+// Set when the log goes to $SLURM_TMPDIR, which is wiped at job end; ERROR
+// lines are then mirrored to stderr (the job's output file).
+static inline int *softmig_log_fallback_flag(void) {
+    static int flag = 0;
+    return &flag;
+}
+
 // Helper function to get log file path (Compute Canada optimized)
 static inline char* get_log_file_path(void) {
     static char log_path[2048] = {0};
@@ -106,6 +113,7 @@ static inline char* get_log_file_path(void) {
             snprintf(log_path, sizeof(log_path), "%s/softmig_%s.log", tmpdir, 
                      job_id ? job_id : "unknown");
             log_path[sizeof(log_path) - 1] = '\0';
+            *softmig_log_fallback_flag() = 1;
         } else {
             fclose(test);
         }
@@ -179,6 +187,24 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
     // Check if console logging is needed BEFORE using va_list
     int log_level = get_log_level();
     int need_console = (log_level >= 3);  // Changed: console only for level >= 3 (info level)
+    int is_error = strcmp(prefix, "ERROR") == 0;
+    
+    if (fp1 == NULL) {
+        char* log_path = get_log_file_path();
+        fp1 = fopen(log_path, "a");
+    }
+    // Errors must survive the job: if the log is in the wiped $SLURM_TMPDIR
+    // (or no log file could be opened), mirror them to stderr.
+    int mirror_error = is_error && (fp1 == NULL || *softmig_log_fallback_flag());
+    if (mirror_error && !need_console) {
+        static int noted = 0;
+        if (!noted) {
+            noted = 1;
+            fprintf(stderr, "[softmig ERROR]: /var/log/softmig not writable; job log is %s (deleted at job end)\n",
+                    fp1 ? get_log_file_path() : "unavailable");
+        }
+        need_console = 1;
+    }
     
     // Copy va_list BEFORE first use if console logging is needed
     va_list args_console;
@@ -186,11 +212,6 @@ static inline void log_to_file_and_console(const char* prefix, const char* msg, 
         va_copy(args_console, args);
     }
     
-    // Always log to file
-    if (fp1 == NULL) {
-        char* log_path = get_log_file_path();
-        fp1 = fopen(log_path, "a");
-    }
     if (fp1 != NULL) {
         fprintf(fp1, "[softmig %s(%d:%ld:%s:%d)]: ", prefix, getpid(), (long)pthread_self(), file_name, __LINE__);
         vfprintf(fp1, msg, args);

@@ -61,7 +61,7 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device, unsigned 
 #endif
 
 #ifndef SEM_WAIT_TIME_ON_EXIT
-#define SEM_WAIT_TIME_ON_EXIT 3
+#define SEM_WAIT_TIME_ON_EXIT 10
 #endif
 
 #ifndef SEM_WAIT_RETRY_TIMES
@@ -665,7 +665,7 @@ int gradual_oom_killer(int cuda_dev) {
         // Re-check memory usage
         uint64_t usage = get_summed_device_memory_usage_from_nvml(cuda_dev);
         if (usage == 0) {
-            usage = get_gpu_memory_usage_nolock(cuda_dev);
+            usage = get_gpu_memory_usage_nolock(cuda_to_nvml_map(cuda_dev));
         }
         
         LOG_DEBUG("gradual_oom_killer: After killing PID %u, usage=%llu limit=%llu", 
@@ -735,6 +735,39 @@ size_t get_gpu_memory_usage_nolock(const int dev) {
     }
     total+=initial_offset;
     return total;
+}
+
+uint64_t get_pending_memory_nolock(const int nvmldev) {
+    if (!is_softmig_enabled() || region_info.shared_region == NULL ||
+            nvmldev < 0 || nvmldev >= CUDA_DEVICE_MAX_COUNT) {
+        return 0;
+    }
+    uint64_t total = 0;
+    for (int i = 0; i < region_info.shared_region->proc_num; i++) {
+        total += region_info.shared_region->procs[i].pending[nvmldev];
+    }
+    return total;
+}
+
+void adjust_pending_memory_nolock(int cudadev, int64_t delta) {
+    if (!is_softmig_enabled() || region_info.shared_region == NULL ||
+            cudadev < 0 || cudadev >= CUDA_DEVICE_MAX_COUNT) {
+        return;
+    }
+    int dev = cuda_to_nvml_map(cudadev);
+    int32_t self = getpid();
+    for (int i = 0; i < region_info.shared_region->proc_num; i++) {
+        shrreg_proc_slot_t *p = &region_info.shared_region->procs[i];
+        if (p->pid != self) {
+            continue;
+        }
+        if (delta < 0 && (uint64_t)(-delta) > p->pending[dev]) {
+            p->pending[dev] = 0;
+        } else {
+            p->pending[dev] += delta;
+        }
+        return;
+    }
 }
 
 size_t get_gpu_memory_usage(const int dev) {
@@ -878,57 +911,8 @@ int rm_gpu_device_memory_usage(int32_t pid,int cudadev,size_t usage,int type){
 }
 
 void get_timespec(int seconds, struct timespec* spec) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);  // struggle with clock_gettime version
-    spec->tv_sec = tv.tv_sec + seconds;
-    spec->tv_nsec = 0;
-}
-
-int fix_lock_shrreg() {
-    int res = 1;
-    if (region_info.fd == -1) {
-        // should never happen
-        LOG_ERROR("Uninitialized shrreg");
-    }
-    // upgrade
-    if (lockf(region_info.fd, F_LOCK, SHARED_REGION_SIZE_MAGIC) != 0) {
-        LOG_ERROR("Fail to upgraded lock: errno=%d", errno);
-    }
-    SEQ_POINT_MARK(SEQ_FIX_SHRREG_ACQUIRE_FLOCK_OK);
-
-    shared_region_t* region = region_info.shared_region;
-    int32_t current_owner = region->owner_pid;
-    if (current_owner != 0) {
-        int flag = 0;
-        if (current_owner == region_info.pid) {
-            // Detect owner pid = self pid
-            LOG_WARN("Owner pid equals self pid (%d), indicates pid loopback or race condition", current_owner);
-            flag = 1;
-        } else {
-            int proc_status = proc_alive(current_owner);
-            if (proc_status == PROC_STATE_NONALIVE) {
-                LOG_INFO("Kick dead owner proc (%d)", current_owner);
-                flag = 1;
-            }
-        }
-        if (flag == 1) {
-            region->owner_pid = region_info.pid;
-            if (sem_destroy(&region->sem) != 0) {
-                LOG_WARN("fix_lock_shrreg: sem_destroy failed: errno=%d", errno);
-            }
-            if (sem_init(&region->sem, 1, 0) != 0) {
-                LOG_ERROR("fix_lock_shrreg: sem_init failed: errno=%d", errno);
-            }
-            SEQ_POINT_MARK(SEQ_FIX_SHRREG_UPDATE_OWNER_OK);
-            res = 0;     
-        }
-    }
-
-    if (lockf(region_info.fd, F_ULOCK, SHARED_REGION_SIZE_MAGIC) != 0) {
-        LOG_ERROR("Fail to upgraded unlock: errno=%d", errno);
-    }
-    SEQ_POINT_MARK(SEQ_FIX_SHRREG_RELEASE_FLOCK_OK);
-    return res;
+    clock_gettime(CLOCK_REALTIME, spec);
+    spec->tv_sec += seconds;
 }
 
 void exit_withlock(int exitcode) {
@@ -936,9 +920,57 @@ void exit_withlock(int exitcode) {
     exit(exitcode);
 }
 
+// The region lock is a robust, process-shared, error-checking mutex. The
+// kernel tracks the owning thread, so:
+//  - a live holder (even one that is SIGSTOPped) is waited for, never robbed;
+//  - if the holder dies, the next locker gets EOWNERDEAD, cleans the process
+//    table and marks the mutex consistent;
+//  - sibling threads of one process serialize like any other contender.
+// Re-entrant per thread via shrreg_lock_depth (callers nest, e.g. the
+// allocator calls helpers that lock again).
+static __thread int shrreg_lock_depth = 0;
+static volatile int shrreg_lock_broken = 0;
 
-// External function from config_file.c - cleanup config file
-// cleanup_config_file removed - cleanup is handled by SLURM epilog script
+static void shrreg_owner_died(shared_region_t* region) {
+    LOG_WARN("shrreg lock owner (pid %ld) died holding the lock - recovering",
+             (long)region->owner_pid);
+    clear_proc_slot_nolock(1);
+    if (pthread_mutex_consistent(&region->lock) != 0) {
+        LOG_ERROR("pthread_mutex_consistent failed: errno=%d", errno);
+    }
+}
+
+// Returns 0 with the lock held, or an error (ETIMEDOUT when give_up_after > 0
+// and that many seconds passed, ENOTRECOVERABLE, ...).
+static int shrreg_acquire(shared_region_t* region, int give_up_after) {
+    int waited = 0;
+    for (;;) {
+        struct timespec ts;
+        get_timespec(SEM_WAIT_TIME, &ts);
+        int rc = pthread_mutex_timedlock(&region->lock, &ts);
+        if (rc == 0) {
+            break;
+        }
+        if (rc == EOWNERDEAD) {
+            shrreg_owner_died(region);
+            break;
+        }
+        if (rc == ETIMEDOUT) {
+            waited += SEM_WAIT_TIME;
+            if (give_up_after > 0 && waited >= give_up_after) {
+                return ETIMEDOUT;
+            }
+            if (waited % (SEM_WAIT_TIME * SEM_WAIT_RETRY_TIMES) == 0) {
+                LOG_WARN("Waiting %ds for shrreg lock held by pid %ld", waited, (long)region->owner_pid);
+            }
+            continue;
+        }
+        return rc;
+    }
+    region->owner_pid = getpid();
+    __sync_synchronize();
+    return 0;
+}
 
 void exit_handler() {
     if (region_info.init_status == PTHREAD_ONCE_INIT) {
@@ -948,88 +980,52 @@ void exit_handler() {
     
     // Check if shared region was never initialized (e.g., program failed to start)
     // This can happen when bash loads the library but the program doesn't exist
-    if (region == NULL) {
-        // Nothing to clean up if shared region wasn't initialized
-        // Config file cleanup is handled by SLURM epilog script
+    if (region == NULL || region == MAP_FAILED) {
         return;
     }
     
-    int slot = 0;
     LOG_MSG("Calling exit handler %d",getpid());
     
-    // Note: Config file cleanup is handled by the SLURM epilog script, not by individual processes
-    
-    struct timespec sem_ts;
-    get_timespec(SEM_WAIT_TIME_ON_EXIT, &sem_ts);
-    int status = sem_timedwait(&region->sem, &sem_ts);
-    if (status == 0) {  // just give up on lock failure
-        region->owner_pid = region_info.pid;
-        while (slot < region->proc_num) {
-            if (region->procs[slot].pid == region_info.pid) {
-                memset(region->procs[slot].used,0,sizeof(device_memory_t)*CUDA_DEVICE_MAX_COUNT);
-                memset(region->procs[slot].device_util,0,sizeof(device_util_t)*CUDA_DEVICE_MAX_COUNT);
-                region->proc_num--;
-                region->procs[slot] = region->procs[region->proc_num];
-                break;
-            }
-            slot++;
+    // exit() from inside a locked section: we already own the lock.
+    int held = shrreg_lock_depth > 0;
+    if (!held && !shrreg_lock_broken) {
+        int rc = shrreg_acquire(region, SEM_WAIT_TIME_ON_EXIT);
+        if (rc != 0) {
+            LOG_WARN("Failed to take lock on exit: errno=%d", rc);
+            return;
         }
-        __sync_synchronize();
+    }
+    int32_t self = getpid();
+    for (int slot = 0; slot < region->proc_num; slot++) {
+        if (region->procs[slot].pid == self) {
+            memset(region->procs[slot].used,0,sizeof(device_memory_t)*CUDA_DEVICE_MAX_COUNT);
+            memset(region->procs[slot].device_util,0,sizeof(device_util_t)*CUDA_DEVICE_MAX_COUNT);
+            region->proc_num--;
+            region->procs[slot] = region->procs[region->proc_num];
+            break;
+        }
+    }
+    __sync_synchronize();
+    if (!held && !shrreg_lock_broken) {
         region->owner_pid = 0;
-        sem_post(&region->sem);
-    } else {
-        LOG_WARN("Failed to take lock on exit: errno=%d", errno);
+        pthread_mutex_unlock(&region->lock);
     }
 }
-
-
-// owner_pid in the shared region is per process, so threads of one process
-// (main + utilization watcher) must serialize locally first. Otherwise a
-// waiting thread sees owner_pid == getpid(), treats it as a stale lock and
-// steals it from its own sibling thread, letting two threads edit the
-// process table at once. Re-entrant per thread.
-static pthread_mutex_t shrreg_local_mutex = PTHREAD_MUTEX_INITIALIZER;
-static __thread int shrreg_lock_depth = 0;
 
 void lock_shrreg() {
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return;
     }
-    if (shrreg_lock_depth++ > 0) {
+    if (shrreg_lock_depth++ > 0 || shrreg_lock_broken) {
         return;
     }
-    pthread_mutex_lock(&shrreg_local_mutex);
-    shared_region_t* region = region_info.shared_region;
-    int trials = 0;
-    while (1) {
-        struct timespec sem_ts;
-        get_timespec(SEM_WAIT_TIME, &sem_ts);
-        int status = sem_timedwait(&region->sem, &sem_ts);
-        SEQ_POINT_MARK(SEQ_ACQUIRE_SEMLOCK_OK);
-
-        if (status == 0) {
-            region->owner_pid = region_info.pid;
-            __sync_synchronize();
-            SEQ_POINT_MARK(SEQ_UPDATE_OWNER_OK);
-            break;
-        } else if (errno == ETIMEDOUT) {
-            trials++;
-            int32_t current_owner = region->owner_pid;
-            if (current_owner != 0 && (current_owner == region_info.pid ||
-                    proc_alive(current_owner) == PROC_STATE_NONALIVE)) {
-                LOG_WARN("Owner proc dead or self (%d), fixing lock", current_owner);
-                if (0 == fix_lock_shrreg()) break;
-            }
-            if (trials > SEM_WAIT_RETRY_TIMES) {
-                LOG_ERROR("Lock shrreg timeout after %ds, forcing recovery (owner=%ld)",
-                    trials * SEM_WAIT_TIME, (long)current_owner);
-                region->owner_pid = region_info.pid;
-                if (0 == fix_lock_shrreg()) break;
-                trials = 0;
-            }
-        } else {
-            LOG_ERROR("Failed to lock shrreg: errno=%d", errno);
-        }
+    int rc = shrreg_acquire(region_info.shared_region, 0);
+    SEQ_POINT_MARK(SEQ_ACQUIRE_SEMLOCK_OK);
+    if (rc != 0) {
+        // ENOTRECOVERABLE (or worse): the lock can never be taken again in
+        // this region. Keep running unlocked rather than hang the job.
+        LOG_ERROR("shrreg lock unusable (rc=%d); continuing without cross-process locking", rc);
+        shrreg_lock_broken = 1;
     }
 }
 
@@ -1041,20 +1037,19 @@ void unlock_shrreg() {
         LOG_WARN("unlock_shrreg without matching lock_shrreg");
         return;
     }
-    if (--shrreg_lock_depth > 0) {
+    if (--shrreg_lock_depth > 0 || shrreg_lock_broken) {
         return;
     }
     SEQ_POINT_MARK(SEQ_BEFORE_UNLOCK_SHRREG);
     shared_region_t* region = region_info.shared_region;
-
-    __sync_synchronize();
     region->owner_pid = 0;
-    // TODO: irregular exit here will hang pending locks
+    __sync_synchronize();
     SEQ_POINT_MARK(SEQ_RESET_OWNER_OK);
-
-    sem_post(&region->sem);
+    int rc = pthread_mutex_unlock(&region->lock);
+    if (rc != 0) {
+        LOG_ERROR("shrreg unlock failed: rc=%d", rc);
+    }
     SEQ_POINT_MARK(SEQ_RELEASE_SEMLOCK_OK);
-    pthread_mutex_unlock(&shrreg_local_mutex);
 }
 
 
@@ -1086,8 +1081,14 @@ void init_proc_slot_withlock() {
     int32_t current_pid = getpid();
     lock_shrreg();
     shared_region_t* region = region_info.shared_region;
+    clear_proc_slot_nolock(1);
     if (region->proc_num >= SHARED_REGION_MAX_PROCESS_NUM) {
-        exit_withlock(-1);
+        // Run untracked rather than kill the user's process: the other
+        // processes still see this one's memory through NVML usage.
+        LOG_ERROR("shrreg full (%d processes); pid %d runs without a slot (not tracked)",
+                  SHARED_REGION_MAX_PROCESS_NUM, current_pid);
+        unlock_shrreg();
+        return;
     }
     // SIGUSR1/2 are commonly used by jobs (e.g. sbatch --signal=USR1@60 for
     // checkpointing). Only take them over for the legacy suspend/resume path
@@ -1103,6 +1104,7 @@ void init_proc_slot_withlock() {
         if (region->procs[i].pid == current_pid) {
             region->procs[i].status = 1;
             memset(region->procs[i].used,0,sizeof(device_memory_t)*CUDA_DEVICE_MAX_COUNT);
+            memset(region->procs[i].pending,0,sizeof(region->procs[i].pending));
             memset(region->procs[i].device_util,0,sizeof(device_util_t)*CUDA_DEVICE_MAX_COUNT);
             found = 1;
             break;
@@ -1112,6 +1114,7 @@ void init_proc_slot_withlock() {
         region->procs[region->proc_num].pid = current_pid;
         region->procs[region->proc_num].status = 1;
         memset(region->procs[region->proc_num].used,0,sizeof(device_memory_t)*CUDA_DEVICE_MAX_COUNT);
+        memset(region->procs[region->proc_num].pending,0,sizeof(region->procs[region->proc_num].pending));
         memset(region->procs[region->proc_num].device_util,0,sizeof(device_util_t)*CUDA_DEVICE_MAX_COUNT);
         region->proc_num++;
     }
@@ -1123,9 +1126,34 @@ void init_proc_slot_withlock() {
 void child_reinit_flag() {
     LOG_DEBUG("Detect child pid: %d -> %d", region_info.pid, getpid());   
     region_info.init_status = PTHREAD_ONCE_INIT;
-    // Only the forking thread survives; a lock another thread held is gone.
-    pthread_mutex_init(&shrreg_local_mutex, NULL);
+    // The child does not own a lock its parent's thread held (robust mutex
+    // ownership is per thread), so it starts with no nesting.
     shrreg_lock_depth = 0;
+}
+
+const char *shrreg_default_path(char *buf, size_t len) {
+    const char *env = getenv(MULTIPROCESS_SHARED_REGION_CACHE_ENV);
+    if (env != NULL) {
+        snprintf(buf, len, "%s", env);
+        return buf;
+    }
+    // SLURM_TMPDIR (/tmp under job_container/tmpfs) is private to the job and
+    // wiped at job end. The layout version is part of the name.
+    const char *tmpdir = getenv("SLURM_TMPDIR");
+    if (tmpdir == NULL) {
+        tmpdir = "/tmp";
+    }
+    const char *job_id = getenv("SLURM_JOB_ID");
+    const char *array_id = getenv("SLURM_ARRAY_TASK_ID");
+    if (job_id != NULL && array_id != NULL) {
+        snprintf(buf, len, "%s/cudevshr.cache.v%d.%s.%s", tmpdir, MAJOR_VERSION, job_id, array_id);
+    } else if (job_id != NULL) {
+        snprintf(buf, len, "%s/cudevshr.cache.v%d.%s", tmpdir, MAJOR_VERSION, job_id);
+    } else {
+        snprintf(buf, len, "%s/cudevshr.cache.v%d.uid%d.pid%d", tmpdir, MAJOR_VERSION, (int)getuid(),
+                 (int)getpid());
+    }
+    return buf;
 }
 
 void try_create_shrreg() {
@@ -1157,44 +1185,8 @@ void try_create_shrreg() {
 
     umask(0);
 
-    char* shr_reg_file = getenv(MULTIPROCESS_SHARED_REGION_CACHE_ENV);
-    if (shr_reg_file == NULL) {
-        // Compute Canada optimized: Use SLURM_TMPDIR with job ID for isolation
-        // Only use SLURM_TMPDIR (not regular /tmp) for proper job isolation
-        static char cache_path[512] = {0};
-        char* tmpdir = getenv("SLURM_TMPDIR");
-        if (tmpdir == NULL) {
-            // No SLURM_TMPDIR - this should only happen outside SLURM jobs
-            // For local testing, use /tmp with job ID if available
-            char* job_id = getenv("SLURM_JOB_ID");
-            if (job_id != NULL) {
-                // We're in a SLURM job but SLURM_TMPDIR not set - use /tmp with job ID
-                tmpdir = "/tmp";
-            } else {
-                // Not in SLURM job - use /tmp (for local testing only)
-                tmpdir = "/tmp";
-            }
-        }
-        
-        // Include job ID for proper isolation (per-job cache)
-        // For oversubscription, each job gets its own cache but they coordinate via shared memory
-        char* job_id = getenv("SLURM_JOB_ID");
-        char* array_id = getenv("SLURM_ARRAY_TASK_ID");
-        
-        if (job_id != NULL) {
-            if (array_id != NULL) {
-                snprintf(cache_path, sizeof(cache_path), "%s/cudevshr.cache.%s.%s", tmpdir, job_id, array_id);
-            } else {
-                snprintf(cache_path, sizeof(cache_path), "%s/cudevshr.cache.%s", tmpdir, job_id);
-            }
-        } else {
-            // Fallback: use user ID and PID
-            uid_t uid = getuid();
-            pid_t pid = getpid();
-            snprintf(cache_path, sizeof(cache_path), "%s/cudevshr.cache.uid%d.pid%d", tmpdir, uid, pid);
-        }
-        shr_reg_file = cache_path;
-    }
+    static char cache_path[512];
+    const char* shr_reg_file = shrreg_default_path(cache_path, sizeof(cache_path));
     // Initialize NVML BEFORE!! open it
     //nvmlInit();
 
@@ -1227,9 +1219,17 @@ void try_create_shrreg() {
             region->limit, CUDA_DEVICE_MAX_COUNT);
         do_init_device_sm_limits(
             region->sm_limit,CUDA_DEVICE_MAX_COUNT);
-        if (sem_init(&region->sem, 1, 1) != 0) {
-            LOG_ERROR("Fail to init sem %s: errno=%d", shr_reg_file, errno);
+        pthread_mutexattr_t attr;
+        pthread_mutexattr_init(&attr);
+        pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+        pthread_mutexattr_setrobust(&attr, PTHREAD_MUTEX_ROBUST);
+        pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
+        int mrc = pthread_mutex_init(&region->lock, &attr);
+        pthread_mutexattr_destroy(&attr);
+        if (mrc != 0) {
+            LOG_ERROR("Fail to init shrreg lock %s: rc=%d", shr_reg_file, mrc);
         }
+        region->owner_pid = 0;
         __sync_synchronize();
         region->sm_init_flag = 0;
         region->utilization_switch = 1;
@@ -1414,7 +1414,7 @@ uint64_t get_current_device_memory_usage(const int dev) {
         LOG_ERROR("Illegal device id: %d", dev);
         return 0;
     }
-    result = get_gpu_memory_usage(dev);
+    result = get_gpu_memory_usage(cuda_to_nvml_map(dev));
     return result;
 }
 

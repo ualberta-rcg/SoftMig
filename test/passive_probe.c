@@ -59,7 +59,7 @@ static int shared_region_present(void) {
     int n = 0;
     const char *jid = getenv("SLURM_JOB_ID");
     char pat[256];
-    snprintf(pat, sizeof pat, "/tmp/cudevshr.cache.%s*", jid ? jid : "uid*");
+    snprintf(pat, sizeof pat, "/tmp/cudevshr.cache*.%s*", jid ? jid : "uid*");
     if (glob(pat, 0, NULL, &g) == 0) {
         n = (int)g.gl_pathc;
         globfree(&g);

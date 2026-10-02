@@ -43,9 +43,10 @@ size_t round_up(size_t size, size_t unit) {
     return size;
 }
 
-// Internal function that doesn't lock (caller must hold lock_shrreg)
-// Uses summed NVML usage (raw per-process values, cgroup/UID-filtered) to check against limit
-int oom_check_nolock(const int dev, size_t addon) {
+// Caller holds lock_shrreg. nvml_usage is the job's summed NVML usage on
+// dev, fetched by the caller (it is a cached read and must not be done
+// under the region lock: the uncached path walks /proc for every PID).
+static int oom_check_usage_nolock(const int dev, size_t addon, uint64_t nvml_usage) {
     // Root user is disabled from OOM checking - only non-root users get this treatment
     uid_t current_uid = getuid();
     if (current_uid == 0) {
@@ -71,12 +72,16 @@ int oom_check_nolock(const int dev, size_t addon) {
     LOG_DEBUG("oom_check_nolock: Starting OOM check for device %d - current PID %d, current UID %u, limit=%llu, addon=%lu", 
              d, getpid(), getuid(), (unsigned long long)limit, addon);
     
-    uint64_t tracked_usage = get_gpu_memory_usage_nolock(d);
-    uint64_t nvml_usage = get_summed_device_memory_usage_from_nvml(d);
-    uint64_t _usage = (tracked_usage > nvml_usage) ? tracked_usage : nvml_usage;
+    // Tracked usage lives at the NVML index; pending is admitted-but-in-flight
+    // (see softmig_reserve), visible to neither tracked nor NVML usage yet.
+    int nd = (int)cuda_to_nvml_map(d);
+    uint64_t tracked_usage = get_gpu_memory_usage_nolock(nd);
+    uint64_t pending = get_pending_memory_nolock(nd);
+    uint64_t _usage = ((tracked_usage > nvml_usage) ? tracked_usage : nvml_usage) + pending;
     
-    LOG_DEBUG("oom_check_nolock: tracked=%llu nvml=%llu using=%llu",
-             (unsigned long long)tracked_usage, (unsigned long long)nvml_usage, (unsigned long long)_usage);
+    LOG_DEBUG("oom_check_nolock: tracked=%llu nvml=%llu pending=%llu using=%llu",
+             (unsigned long long)tracked_usage, (unsigned long long)nvml_usage,
+             (unsigned long long)pending, (unsigned long long)_usage);
 
     uint64_t new_allocated = _usage + addon;
     LOG_DEBUG("oom_check_nolock: Device %d - _usage=%llu limit=%llu addon=%lu new_allocated=%llu (current PID %d, current UID %u)", 
@@ -88,9 +93,10 @@ int oom_check_nolock(const int dev, size_t addon) {
         // Try to clear dead processes first
         if (clear_proc_slot_nolock(1) > 0) {
             // Recheck after clearing dead processes
-            tracked_usage = get_gpu_memory_usage_nolock(d);
+            tracked_usage = get_gpu_memory_usage_nolock(nd);
             nvml_usage = get_summed_device_memory_usage_from_nvml(d);
-            _usage = (tracked_usage > nvml_usage) ? tracked_usage : nvml_usage;
+            pending = get_pending_memory_nolock(nd);
+            _usage = ((tracked_usage > nvml_usage) ? tracked_usage : nvml_usage) + pending;
             new_allocated = _usage + addon;
             if (new_allocated <= limit) {
                 LOG_DEBUG("After clearing dead processes, allocation now allowed: %llu / %llu", 
@@ -115,9 +121,19 @@ int oom_check_nolock(const int dev, size_t addon) {
     return 0;
 }
 
+// Internal function that doesn't lock (caller must hold lock_shrreg)
+int oom_check_nolock(const int dev, size_t addon) {
+    CUdevice d = dev;
+    if (dev == -1) cuCtxGetDevice(&d);
+    return oom_check_usage_nolock(d, addon, get_summed_device_memory_usage_from_nvml(d));
+}
+
 int oom_check(const int dev, size_t addon) {
+    CUdevice d = dev;
+    if (dev == -1) cuCtxGetDevice(&d);
+    uint64_t nvml_usage = get_summed_device_memory_usage_from_nvml(d);
     lock_shrreg();
-    int result = oom_check_nolock(dev, addon);
+    int result = oom_check_usage_nolock(d, addon, nvml_usage);
     unlock_shrreg();
     return result;
 }
@@ -134,75 +150,84 @@ void allocator_init() {
     pthread_mutex_init(&mutex,NULL);
 }
 
-int add_chunk(CUdeviceptr *address, size_t size) {
-    // Note: This function should be called while holding the mutex (from allocate_raw)
-    // We also hold lock_shrreg() during the entire check+allocate+update to prevent
-    // race conditions where multiple processes see the same available memory
-    size_t addr=0;
-    size_t allocsize;
-    CUresult res = CUDA_SUCCESS;
-    CUdevice dev;
-    cuCtxGetDevice(&dev);
-    
-    // Lock shared region for atomic check+allocate+update
+/*
+ * Admission control without holding the region lock across the driver call:
+ *   softmig_reserve()   - under the lock: limit check, then record the bytes
+ *                         as pending in this process's slot;
+ *   <driver allocation> - no lock held, so processes allocate concurrently;
+ *   commit              - track the chunk and drop the pending bytes
+ *                         (add_chunk_only / add_chunk_async_only), or
+ *   softmig_unreserve() - drop the pending bytes if the driver call failed.
+ * oom_check_nolock counts pending bytes, so concurrent admissions can never
+ * overshoot the limit; pending bytes of a process that dies go with its slot.
+ */
+int softmig_reserve(int dev, size_t size) {
+    uint64_t nvml_usage = get_summed_device_memory_usage_from_nvml(dev);
     lock_shrreg();
-    
-    // Check OOM while holding lock (use nolock version to avoid deadlock)
-    if (oom_check_nolock(dev,size)) {
+    if (oom_check_usage_nolock(dev, size, nvml_usage)) {
         unlock_shrreg();
-        return CUDA_ERROR_OUT_OF_MEMORY;
+        return 1;
     }
-    
-    allocated_list_entry *e;
-    INIT_ALLOCATED_LIST_ENTRY(e,addr,size);
-    if (size <= IPCSIZE)
-        res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAlloc_v2,&e->entry->address,size);
-    else{
-        e->entry->length = size;
-        res = softmig_mem_allocate(&e->entry->address, size, e->entry->allocHandle);
-    }
-    if (res!=CUDA_SUCCESS){
-        LOG_ERROR("cuMemoryAllocate failed res=%d",res);
-        unlock_shrreg();
-        return res;
-    }
-    LIST_ADD(device_overallocated,e);
-    //uint64_t t_size;
-    *address = e->entry->address;
-    allocsize = size;
-    cuCtxGetDevice(&dev);
-    // Update usage tracking while still holding both locks (atomic with check+allocate)
-    add_gpu_device_memory_usage(getpid(), dev, allocsize, 2);
-    
-    // Release shared region lock
+    adjust_pending_memory_nolock(dev, (int64_t)size);
     unlock_shrreg();
     return 0;
 }
 
-int add_chunk_only(CUdeviceptr address, size_t size) {
-    pthread_mutex_lock(&mutex);
+void softmig_unreserve(int dev, size_t size) {
     lock_shrreg();
-    
-    size_t addr=0;
-    size_t allocsize;
+    adjust_pending_memory_nolock(dev, -(int64_t)size);
+    unlock_shrreg();
+}
+
+int add_chunk(CUdeviceptr *address, size_t size) {
     CUdevice dev;
     cuCtxGetDevice(&dev);
-    if (oom_check_nolock(dev,size)){
-        unlock_shrreg();
-        pthread_mutex_unlock(&mutex);
+    if (softmig_reserve(dev, size)) {
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
     allocated_list_entry *e;
+    size_t addr = 0;
     INIT_ALLOCATED_LIST_ENTRY(e,addr,size);
+    CUresult res;
+    if (size <= IPCSIZE) {
+        res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAlloc_v2,&e->entry->address,size);
+    } else {
+        e->entry->length = size;
+        res = softmig_mem_allocate(&e->entry->address, size, e->entry->allocHandle);
+    }
+    if (res != CUDA_SUCCESS) {
+        softmig_unreserve(dev, size);
+        free(e->entry->allocHandle);
+        free(e->entry);
+        free(e);
+        return res;
+    }
+    *address = e->entry->address;
+    pthread_mutex_lock(&mutex);
     LIST_ADD(device_overallocated,e);
-    e->entry->address=address;
-    allocsize = size;
-    cuCtxGetDevice(&dev);
-    add_gpu_device_memory_usage(getpid(), dev, allocsize, 2);
-    
-    unlock_shrreg();
-    nvml_cache_invalidate((int)dev);
     pthread_mutex_unlock(&mutex);
+    lock_shrreg();
+    adjust_pending_memory_nolock(dev, -(int64_t)size);
+    add_gpu_device_memory_usage(getpid(), dev, size, 2);
+    unlock_shrreg();
+    return 0;
+}
+
+// Commit a chunk whose driver allocation succeeded after softmig_reserve().
+int add_chunk_only(CUdeviceptr address, size_t size) {
+    CUdevice dev;
+    cuCtxGetDevice(&dev);
+    allocated_list_entry *e;
+    size_t addr = 0;
+    INIT_ALLOCATED_LIST_ENTRY(e,addr,size);
+    e->entry->address = address;
+    pthread_mutex_lock(&mutex);
+    LIST_ADD(device_overallocated,e);
+    pthread_mutex_unlock(&mutex);
+    lock_shrreg();
+    adjust_pending_memory_nolock(dev, -(int64_t)size);
+    add_gpu_device_memory_usage(getpid(), dev, size, 2);
+    unlock_shrreg();
     return 0;
 }
 
@@ -266,30 +291,23 @@ int remove_chunk(allocated_list *a_list, CUdeviceptr dptr) {
 
 int remove_chunk_only(CUdeviceptr dptr) {
     allocated_list *a_list = device_overallocated;
-    size_t t_size;
-    if (a_list->length == 0) {
+    pthread_mutex_lock(&mutex);
+    allocated_list_entry *val = find_chunk(a_list, dptr);
+    if (val == NULL) {
+        pthread_mutex_unlock(&mutex);
         return -1;
     }
-    allocated_list_entry *val;
-    for (val = a_list->head; val != NULL; val = val->next) {
-        if (val->entry->address == dptr) {
-            t_size = val->entry->length;
-            LIST_REMOVE(a_list, val);
-            CUdevice dev;
-            cuCtxGetDevice(&dev);
-            rm_gpu_device_memory_usage(getpid(), dev, t_size, 2);
-            return 0;
-        }
-    }
-    return -1;
+    size_t t_size = val->entry->length;
+    LIST_REMOVE(a_list, val);
+    pthread_mutex_unlock(&mutex);
+    CUdevice dev;
+    cuCtxGetDevice(&dev);
+    rm_gpu_device_memory_usage(getpid(), dev, t_size, 2);
+    return 0;
 }
 
 int allocate_raw(CUdeviceptr *dptr, size_t size) {
-    int tmp;
-    pthread_mutex_lock(&mutex);
-    tmp = add_chunk(dptr, size);
-    pthread_mutex_unlock(&mutex);
-    return tmp;
+    return add_chunk(dptr, size);
 }
 
 int free_raw(CUdeviceptr dptr) {
@@ -330,94 +348,81 @@ int free_raw_async(CUdeviceptr dptr, CUstream hStream) {
 }
 
 int add_chunk_async(CUdeviceptr *address, size_t size, CUstream hStream) {
-    size_t addr=0;
-    size_t allocsize;
-    CUresult res = CUDA_SUCCESS;
     CUdevice dev;
     cuCtxGetDevice(&dev);
-
-    lock_shrreg();
-    if (oom_check_nolock(dev,size)) {
-        unlock_shrreg();
+    if (softmig_reserve(dev, size)) {
         return CUDA_ERROR_OUT_OF_MEMORY;
     }
-
     allocated_list_entry *e;
+    size_t addr = 0;
     INIT_ALLOCATED_LIST_ENTRY(e,addr,size);
-    res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocAsync,&e->entry->address,size,hStream);
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAllocAsync,&e->entry->address,size,hStream);
     if (res != CUDA_SUCCESS) {
-        unlock_shrreg();
-        LOG_ERROR("cuMemoryAllocate failed res=%d",res);
+        softmig_unreserve(dev, size);
+        free(e->entry->allocHandle);
+        free(e->entry);
+        free(e);
         return res;
     }
     *address = e->entry->address;
+
+    // Pool attribute reads are best-effort bookkeeping and stay outside the
+    // region lock. The default pool may already hold the memory (reuse), in
+    // which case only the growth of RESERVED_MEM_HIGH is new usage.
     CUmemoryPool pool;
-    res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetMemPool,&pool,dev);
     size_t poollimit = 0;
-    if (res == CUDA_SUCCESS) {
-        res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemPoolGetAttribute,pool,CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,&poollimit);
+    CUresult pres = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDeviceGetMemPool,&pool,dev);
+    if (pres == CUDA_SUCCESS) {
+        pres = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemPoolGetAttribute,pool,CU_MEMPOOL_ATTR_RESERVED_MEM_HIGH,&poollimit);
     }
-    if (res != CUDA_SUCCESS) {
-        // The real allocation already succeeded; pool attribute reads are
-        // best-effort bookkeeping. Track the requested size instead of
-        // abandoning a live allocation.
-        LOG_DEBUG("pool attribute read failed res=%d (non-fatal), tracking requested size %lu",res,size);
-        e->entry->length = size;
-        cuCtxGetDevice(&dev);
-        add_gpu_device_memory_usage(getpid(), dev, size, 2);
-        device_allocasync->limit += size;
-    } else if (poollimit != 0) {
-        if (poollimit> device_allocasync->limit) {
-            allocsize = (poollimit-device_allocasync->limit < size)? poollimit-device_allocasync->limit : size;
-            cuCtxGetDevice(&dev);
-            add_gpu_device_memory_usage(getpid(), dev, allocsize, 2);
-            device_allocasync->limit=device_allocasync->limit+allocsize;
-            e->entry->length=allocsize;
-        }else{
-            e->entry->length=0;
-        }
+
+    pthread_mutex_lock(&mutex);
+    size_t allocsize;
+    if (pres != CUDA_SUCCESS || poollimit == 0) {
+        // No slab accounting possible: track the requested size so the free
+        // path stays balanced.
+        LOG_DEBUG("pool attribute unavailable (res=%d, high=%lu), tracking requested size %lu", pres, poollimit, size);
+        allocsize = size;
+    } else if (poollimit > device_allocasync->limit) {
+        allocsize = (poollimit - device_allocasync->limit < size) ? poollimit - device_allocasync->limit : size;
     } else {
-        // RESERVED_MEM_HIGH == 0: no slab accounting possible. Track the
-        // requested size so the free path stays balanced.
-        e->entry->length = size;
-        cuCtxGetDevice(&dev);
-        add_gpu_device_memory_usage(getpid(), dev, size, 2);
-        device_allocasync->limit += size;
+        allocsize = 0;
+    }
+    e->entry->length = allocsize;
+    device_allocasync->limit += allocsize;
+    LIST_ADD(device_allocasync,e);
+    pthread_mutex_unlock(&mutex);
+
+    lock_shrreg();
+    adjust_pending_memory_nolock(dev, -(int64_t)size);
+    if (allocsize) {
+        add_gpu_device_memory_usage(getpid(), dev, allocsize, 2);
     }
     unlock_shrreg();
-    LIST_ADD(device_allocasync,e);
-    nvml_cache_invalidate((int)dev);
     return 0;
 }
 
 int allocate_async_raw(CUdeviceptr *dptr, size_t size, CUstream hStream) {
-    int tmp;
-    pthread_mutex_lock(&mutex);
-    tmp = add_chunk_async(dptr,size,hStream);
-    pthread_mutex_unlock(&mutex);
-    return tmp;
+    return add_chunk_async(dptr, size, hStream);
 }
 
-// Track a chunk allocated outside the cuMemAllocAsync path (e.g.
-// cuMemAllocFromPoolAsync) in the async list. The caller has already run
-// oom_check and the real allocation; this only records bookkeeping, so the
-// free path (remove_chunk_async) stays balanced with the driver state.
+// Commit a chunk allocated outside the cuMemAllocAsync path (e.g.
+// cuMemAllocFromPoolAsync) after softmig_reserve() and the real allocation,
+// so the free path (remove_chunk_async) stays balanced with the driver state.
 int add_chunk_async_only(CUdeviceptr address, size_t size) {
-    pthread_mutex_lock(&mutex);
-    lock_shrreg();
-
-    size_t addr=0;
     CUdevice dev;
     cuCtxGetDevice(&dev);
     allocated_list_entry *e;
+    size_t addr = 0;
     INIT_ALLOCATED_LIST_ENTRY(e,addr,size);
-    LIST_ADD(device_allocasync,e);
     e->entry->address = address;
-    add_gpu_device_memory_usage(getpid(), dev, size, 2);
+    pthread_mutex_lock(&mutex);
+    LIST_ADD(device_allocasync,e);
     device_allocasync->limit += size;
-
-    unlock_shrreg();
-    nvml_cache_invalidate((int)dev);
     pthread_mutex_unlock(&mutex);
+    lock_shrreg();
+    adjust_pending_memory_nolock(dev, -(int64_t)size);
+    add_gpu_device_memory_usage(getpid(), dev, size, 2);
+    unlock_shrreg();
     return 0;
 }

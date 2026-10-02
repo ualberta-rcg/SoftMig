@@ -45,9 +45,6 @@
 #define SHARED_REGION_MAX_PROCESS_NUM 1024
 
 // macros for debugging
-#define SEQ_FIX_SHRREG_ACQUIRE_FLOCK_OK 0
-#define SEQ_FIX_SHRREG_UPDATE_OWNER_OK 1
-#define SEQ_FIX_SHRREG_RELEASE_FLOCK_OK 2
 #define SEQ_ACQUIRE_SEMLOCK_OK 3
 #define SEQ_UPDATE_OWNER_OK 4
 #define SEQ_RESET_OWNER_OK 5
@@ -63,8 +60,12 @@
 
 #define FACTOR 32
 
-#define MAJOR_VERSION 1
-#define MINOR_VERSION 1
+// 2.0: robust process-shared mutex replaces sem_t + owner_pid recovery.
+// The major version is part of the region file name, so processes from
+// different layouts (e.g. a job spanning a library redeploy) never share
+// a region.
+#define MAJOR_VERSION 2
+#define MINOR_VERSION 0
 
 typedef struct {
     uint64_t context_size;
@@ -88,6 +89,7 @@ typedef struct {
     device_memory_t used[CUDA_DEVICE_MAX_COUNT];
     uint64_t monitorused[CUDA_DEVICE_MAX_COUNT];
     device_util_t device_util[CUDA_DEVICE_MAX_COUNT];
+    uint64_t pending[CUDA_DEVICE_MAX_COUNT];  // admitted, driver allocation in flight (NVML index)
     int32_t status;
     uint64_t unused[3];
 } shrreg_proc_slot_t;
@@ -99,8 +101,8 @@ typedef struct {
     uint32_t major_version;
     uint32_t minor_version;
     int32_t sm_init_flag;
-    size_t owner_pid;
-    sem_t sem;
+    size_t owner_pid;       // diagnostic only (who holds lock); never used for recovery
+    pthread_mutex_t lock;   // PTHREAD_PROCESS_SHARED | PTHREAD_MUTEX_ROBUST | ERRORCHECK
     uint64_t device_num;
     uuid uuids[CUDA_DEVICE_MAX_COUNT];
     uint64_t limit[CUDA_DEVICE_MAX_COUNT];
@@ -152,6 +154,14 @@ uint64_t get_current_device_memory_usage(const int dev);
 size_t get_gpu_memory_usage(const int dev);
 // Get memory usage without locking (caller must hold lock_shrreg)
 size_t get_gpu_memory_usage_nolock(const int dev);
+
+/** Bytes admitted by softmig_reserve() whose driver allocation has not
+ *  completed yet, summed over all processes (NVML device index; caller holds
+ *  lock_shrreg). */
+uint64_t get_pending_memory_nolock(const int nvmldev);
+
+/** Adjust this process's pending bytes on a CUDA device (caller holds lock_shrreg). */
+void adjust_pending_memory_nolock(int cudadev, int64_t delta);
 // Get summed memory usage from NVML for a CUDA device (cgroup/UID filtered, raw per-process values)
 uint64_t get_summed_device_memory_usage_from_nvml(int cuda_dev);
 
@@ -190,11 +200,16 @@ int shrreg_major_version();
 int shrreg_minor_version();
 int init_device_info();
 
-/** Acquire the shared region semaphore (blocks with timeout, auto-recovers dead owners). */
+/** Acquire the shared region lock. Re-entrant per thread; waits for a live
+ *  holder indefinitely (WARN every 15 s) and recovers via EOWNERDEAD if the
+ *  holder died. */
 void lock_shrreg();
 
-/** Release the shared region semaphore. */
+/** Release the shared region lock. */
 void unlock_shrreg();
+
+/** Path of this job's shared region file (also used by test/shrreg_check). */
+const char *shrreg_default_path(char *buf, size_t len);
 
 //Setspec of the corresponding device
 int setspec();

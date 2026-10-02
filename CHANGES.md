@@ -5,6 +5,91 @@ For deployment and usage instructions, see `README.md`.
 
 ---
 
+## 2026-10-01 — branch `2.06`
+
+### Shared-region lock: robust mutex, nobody gets robbed
+
+The region lock was a `sem_t` plus an `owner_pid` used to guess when a
+holder was gone; after 18 s a waiter "recovered" the lock by force even from
+a live holder and re-initialized the semaphore under other waiters. The new
+`fault` suite reproduced it on 2.05: SIGSTOPped workers had the lock stolen
+4 times and the semaphore was left in a held state with no owner.
+
+The lock is now a robust, process-shared, error-checking `pthread_mutex_t`
+(region layout 2.0). A live holder is waited for (WARN every 15 s); if a
+holder dies the kernel hands the next locker `EOWNERDEAD`, which clears dead
+slots and marks the mutex consistent. Re-entrant per thread. `fix_lock_shrreg`
+and the forced recovery are gone. The layout version is part of the region
+file name (`cudevshr.cache.v2.<jobid>`), so a job spanning a library redeploy
+never mixes layouts in one file. The exit handler waits up to 10 s (was 3 s).
+
+### Allocations no longer run under the lock
+
+The limit check, the real `cuMemAlloc` and the bookkeeping all ran under
+the region lock, serializing every allocation in a job. Now:
+`softmig_reserve()` checks the limit and records the bytes as *pending* in
+the process's slot (under the lock), the driver allocation runs with no lock
+held, and the chunk is committed (or the reservation released). The limit
+check counts `max(tracked, NVML) + pending`, so concurrent admissions stay
+exact; a process that dies mid-allocation takes its pending bytes with its
+slot. The NVML usage read happens before taking the lock, and allocation
+commits no longer invalidate the NVML cache (only frees do).
+`cuMemAllocManaged`, `cuMemAllocPitch_v2`, `cuMemCreate` and
+`cuMemAllocFromPoolAsync` use the same reserve/commit pair; previously they
+re-ran the limit check after a successful driver allocation and could
+return OOM with the memory live and untracked.
+
+Stress suite (64 processes x 4 threads on a half slice): 199k alloc/free
+cycles vs 44k on 2.05 in the same time, no lock timeouts (2.05: 3 exits
+could not take the lock); under 1 GiB requests from 16 processes the real
+peak stayed at 18.4 of 23.0 GiB with OOMs returned.
+
+### Other fixes
+
+- Tracked usage is stored at the NVML device index but the OOM check, the
+  OOM killers and `get_current_device_memory_usage` read it with CUDA
+  indices; they now map first (matters when CUDA and NVML numbering differ).
+- Region full (1024 processes): the extra process runs untracked with an
+  ERROR instead of being killed by `exit(-1)`.
+- `remove_chunk_only` (cuMemRelease) now takes the allocator mutex.
+- If `/var/log/softmig` is not writable the log falls back to
+  `$SLURM_TMPDIR`, which is wiped at job end; ERROR lines are then also
+  written to stderr (the job's output file), with a note naming the file.
+- `cuGraphAddMemAllocNode` is hooked as a limit check (graph memory nodes
+  were an unacknowledged bypass). Nodes created implicitly by stream capture
+  are still not seen.
+
+### Tests
+
+- Hang capture: suites arm an in-job watchdog; a hang becomes `HANG` with
+  per-thread `/proc` state, and with `SOFTMIG_HANG_GDB_SUDO=1` the runner
+  takes root gdb stacks on the reservation node (ptrace_scope=1 blocks it
+  inside the job). The stuck processes are then killed so logs are kept.
+- New one-off suites (CUDA 12.6): `stress` (16/32/64 procs + enforcement
+  round), `fault` (SIGKILL/SIGSTOP injection), `frameworks` (PyTorch native
+  and cudaMallocAsync, TensorFlow, DataLoader fork + spawn; slice and full
+  GPU), `fork`, `multigpu`, `array`, `security` (env vars ignored, symlinked
+  and user-owned configs rejected; root side needs `SOFTMIG_TEST_SUDO=1`),
+  `container` and `overhead` (informational). New probes: `stress_alloc`,
+  `shrreg_check`, `fork_probe`, `multigpu_probe`, `bench_overhead`,
+  `test/python/fw_limit.py`.
+
+### Findings (documented, not changed)
+
+- Apptainer: the library is not loaded inside containers (their own
+  `/etc/ld.so.preload`), so slices are not enforced there. Preloading it
+  into the container does not help: the user namespace shows the root-owned
+  config as uid 65534, so it is rejected and the library stays passive,
+  which is the safe outcome. Enforcement in containers needs site policy.
+- Slurm: a mixed request `--gres=gpu:l40s.2:1,gpu:l40s.4:1` is accepted,
+  allocates one shard (`AllocTRES gres/shard=1`) but the prolog writes a
+  half-GPU limit, so the job gets twice the memory it was allocated.
+  Identical-size multi-slice requests are rejected by job_submit.
+- Overhead (`bench_overhead`): passive adds ~3 ns per launch; a slice adds
+  ~0.2 us per launch and ~44 us per alloc+free.
+
+---
+
 ## 2026-10-01 — branch `2.05`
 
 ### Off means off: one passive decision, enforced at the choke points

@@ -45,7 +45,7 @@ library hands out the driver's own functions (see the next section).
 
 With `SOFTMIG_LOG_LEVEL=2` (or higher) a passive process logs once:
 `CUDA_DEVICE_MEMORY_LIMIT and CUDA_DEVICE_SM_LIMIT not set - softmig disabled (passive mode)`.
-Other signs of passive mode: no `/tmp/cudevshr.cache.<jobid>` in the job, no
+Other signs of passive mode: no `/tmp/cudevshr.cache.v2.<jobid>` in the job, no
 `Initializing` / `shrreg created` lines in `/var/log/softmig/<jobid>.log`.
 `build/test/passive_probe --expect passive` (or `--expect enabled` in a slice
 job) checks it end to end; `test/suite_passive.sh` wraps it.
@@ -65,7 +65,6 @@ then add hooks. Deliberately unhooked, and therefore not logged:
 
 - `cuLaunchHostFunc*` (host callbacks, no GPU work to throttle)
 - `cuLaunchCooperativeKernelMultiDevice` (deprecated, removed in CUDA 13)
-- `cuGraphAddMemAllocNode` (graph memory nodes are not limit-enforced)
 - `cuMemAllocHost`, `cuMemFreeHost`, `cuMemAllocManaged_ptsz` (host or
   managed memory, not device memory)
 - the pre-CUDA-3.2 unversioned names (`cuMemAlloc`, `cuMemFree`,
@@ -80,6 +79,43 @@ lock; every other CUDA/NVML process in the job (including `nvidia-smi`) then
 blocks in `nvmlInit`/`cuInit`. Fixed in 2.05. On an older build, killing the
 spinning process (100% CPU, stack in `libsoftmig.so` under
 `nvmlInitWithFlags` or `cuInit`) releases the others.
+
+Since 2.06 the lock is a robust mutex and is never taken from a live holder.
+`Waiting <n>s for shrreg lock held by pid <p>` means pid `<p>` is holding it
+(for example it is stopped in a debugger or with SIGSTOP); every other
+SoftMig process in the job waits until it continues or dies. If it dies, the
+next process logs `shrreg lock owner (pid <p>) died holding the lock -
+recovering` and carries on. `build/test/shrreg_check` inside the job prints
+the region state (process slots, dead/empty slots, lock state).
+
+## Symptom: no `/var/log/softmig/<jobid>.log`
+
+If `/var/log/softmig` is not writable on the node, SoftMig logs to
+`$SLURM_TMPDIR/softmig_<jobid>.log`, which is deleted when the job ends. ERROR
+lines are then also written to stderr (the job's output file), preceded by a
+note naming the fallback file. Fix the directory (root-owned, mode 1777 or
+per-job writable) so logs outlive the job.
+
+## Containers (Apptainer)
+
+SoftMig does not limit processes inside containers. A container has its own
+`/etc/ld.so.preload`, so the library is not loaded there and `nvidia-smi`
+inside a quarter-slice job shows the whole GPU. Preloading it explicitly
+(`APPTAINERENV_LD_PRELOAD`, binding the library and `/var/run/softmig`) loads
+it, but the user namespace shows the root-owned config as uid 65534, so it is
+rejected and the library stays passive. That is deliberate: inside a
+container (especially with `--fakeroot`) the user controls what looks
+root-owned. Enforcing slices in containers needs site policy (for example
+refusing containers on slice jobs, or a hardware partition such as MIG).
+`test/suite_container.sh` records the current behaviour.
+
+## Mixed slice sizes in one request
+
+`--gres=gpu:l40s.2:1,gpu:l40s.4:1` is accepted by the site's job_submit, but
+Slurm allocates one shard while the prolog writes a half-GPU limit, so the job
+gets more memory than it was allocated. Identical sizes
+(`--gres=gpu:l40s.4:2`) are rejected. This is a job_submit/prolog policy
+issue (`test/suite_multigpu.sh` reports it as `MISMATCH`).
 
 ## Symptom: `nvidia-smi` shows full VRAM in a sliced job
 

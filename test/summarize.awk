@@ -29,15 +29,17 @@ NR == 1 { next }  # header
     else if (status == "FAIL") n_fail++
     else if (status == "PARTIAL") n_partial++
     else if (status == "SKIP") n_skip++
+    else if (status == "HANG") n_hang++
+    else if (status == "INFO") n_info++
 }
 
 END {
-    total = n_pass + n_fail + n_partial + n_skip
+    total = n_pass + n_fail + n_partial + n_skip + n_hang + n_info
     print "# SoftMig multi-CUDA test matrix summary"
     print ""
     print "Generated: " strftime("%Y-%m-%d %H:%M:%S")
     print ""
-    print "Total: " total "   PASS: " n_pass "   PARTIAL: " n_partial "   FAIL: " n_fail "   SKIP: " n_skip
+    print "Total: " total "   PASS: " n_pass "   PARTIAL: " n_partial "   FAIL: " n_fail "   SKIP: " n_skip "   HANG: " n_hang+0 "   INFO: " n_info+0
     print ""
 
     # --- per-version x slice x suite table ---
@@ -110,7 +112,7 @@ END {
     any_fail = 0
     for (r in rows) {
         split(rows[r], f, "\t")
-        if (f[5] == "FAIL" || f[5] == "PARTIAL") {
+        if (f[5] == "FAIL" || f[5] == "PARTIAL" || f[5] == "HANG") {
             if (!any_fail) { print "## Failures / partials"; print ""; print "| cuda | slice | suite | jobid | status | detail |"; print "|---|---|---|---|---|---|"; any_fail = 1 }
             printf("| %s | %s | %s | %s | %s | %s |\n", f[1], f[2], f[3], f[4], f[5], f[7])
         }

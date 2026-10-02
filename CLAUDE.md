@@ -55,7 +55,8 @@ test/                   — test runners and CUDA probe binaries
    `dlsym`, `cuGetProcAddress*` and `nvmlInit*` forward to the driver and
    every exported wrapper starts with `SOFTMIG_PASSIVE_FORWARD` /
    `SOFTMIG_MEM_GUARD`. **Enabled**: on first `cuInit`/`nvmlInit` the shared
-   region (`/tmp/cudevshr.cache.<jobid>`) is initialized and, if
+   region (`$SLURM_TMPDIR/cudevshr.cache.v<major>.<jobid>[.<arrayid>]`) is
+   initialized and, if
    `0 < SM limit < 100`, the utilization watcher starts.
 5. `config_file.c` reads limits from root-owned files in `/var/run/softmig/`
    written by the SLURM prolog. In SLURM jobs, environment variable fallback
@@ -74,9 +75,15 @@ test/                   — test runners and CUDA probe binaries
   tracking, no shared region, no watcher, no signal handlers, no NVML
   filtering (full-GPU jobs are exclusive). Mode is fixed for the process
   lifetime (prolog writes the config before the job starts).
-- **Memory enforcement**: `cuMemAlloc` → allocator checks summed NVML usage
-  against limit → returns `CUDA_ERROR_OUT_OF_MEMORY` if exceeded (matches
-  real-GPU behavior). NVML usage is summed per-process from raw
+- **Memory enforcement**: `cuMemAlloc` → `softmig_reserve()` (under the
+  region lock: limit check against `max(tracked, NVML) + pending`, then the
+  bytes are recorded as pending in this process's slot) → real driver
+  allocation with **no lock held** → commit (track chunk, drop pending) or
+  `softmig_unreserve()` on failure. Over the limit returns
+  `CUDA_ERROR_OUT_OF_MEMORY` (matches real-GPU behavior). Pending bytes make
+  concurrent admissions exact; a process that dies mid-allocation takes its
+  pending bytes with its slot. Tracked usage and pending are stored at the
+  NVML device index (`cuda_to_nvml_map`); callers pass CUDA indices. NVML usage is summed per-process from raw
   `usedGpuMemory` values using cgroup/UID filtering, with a 1-second TTL
   cache; no per-process inflation is applied. Pool allocations
   (`cuMemAllocFromPoolAsync`) go through the same `oom_check` and are
@@ -106,10 +113,18 @@ test/                   — test runners and CUDA probe binaries
   time and fails if an exported wrapper reaching SoftMig internals has no
   guard. `test/audit_hooks.sh` lists driver entry points we should hook but
   don't; the same watch lists drive the runtime `UNHOOKED` log line.
-- Shared region: created under `lockf()`; the region lock is a process-shared
-  semaphore with `owner_pid`. Threads of one process serialize on a local
-  mutex first (`owner_pid` cannot tell sibling threads apart), and the lock
-  is re-entrant per thread.
+- Shared region (layout 2.0): created under `lockf()`; the region lock is a
+  robust, process-shared, error-checking `pthread_mutex_t`. A live holder
+  (even SIGSTOPped) is waited for indefinitely (WARN every 15 s), never
+  robbed; a dead holder hands the next locker `EOWNERDEAD`, which clears
+  dead slots and marks the mutex consistent. Re-entrant per thread via a
+  depth counter. `owner_pid` is diagnostic only. Changing the layout means
+  bumping `MAJOR_VERSION`, which is part of the region file name.
+- Region full (1024 processes): the extra process runs untracked (ERROR in
+  the log) instead of exiting.
+- Logs: `/var/log/softmig/<jobid>.log`; if that is not writable the log goes
+  to `$SLURM_TMPDIR` (wiped at job end) and ERROR lines are mirrored to
+  stderr.
 - Array jobs: config lookup falls back from `{jobid}_{arrayid}.conf` to
   `{jobid}.conf` since `SLURM_ARRAY_TASK_ID` may not be set in prolog.
 - `nvmlProcessInfo_t` is defined locally in `nvml-subset.h` to match the
@@ -140,7 +155,13 @@ and store artifacts under `test_results/matrix_<ts>/`. Key suites: `smoke`,
 `direct`, `sm`, `oom`, `crossjob`, `pool` (pool-allocation free-failure
 regression), `passive` (`test/passive_probe.c`: full-GPU job must get the
 driver's own pointers, slice job must get hooks), plus one-offs `mixed`,
-`soak`, `nvsmi`. Any `UNHOOKED` line in a job log fails smoke/direct/passive.
+`soak`, `nvsmi`, and (2.06, CUDA 12.6) `stress`, `fault`, `frameworks`,
+`fork`, `multigpu`, `array`, `security`, `container`, `overhead`. Any
+`UNHOOKED` line in a job log fails smoke/direct/passive. Suites arm an in-job
+watchdog (`_hang_watchdog`): a hang becomes status `HANG` with per-thread
+`/proc` state, plus root gdb stacks when run with `SOFTMIG_HANG_GDB_SUDO=1`
+(ptrace_scope=1 on the nodes, so only root can attach). `security` needs
+`SOFTMIG_TEST_SUDO=1` for its root-side config tampering cases.
 `test/audit_hooks.sh` (run on the node) is the static hook audit. `test/jax_cuda_async.sh`
 is the JAX `cuda_async` end-to-end test (run inside a GPU allocation).
 
