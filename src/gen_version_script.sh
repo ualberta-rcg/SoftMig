@@ -17,10 +17,12 @@ OUT="${2:-/dev/stdout}"
 # couple of bootstrap symbols.
 SYMS=$(
   {
-    grep -hE '^(CUresult|nvmlReturn_t|void|int)[[:space:]]+(cu|nvml)[A-Za-z0-9_]+[[:space:]]*\(' \
+    # Only real driver API names (cuX..., nvmlX...); internal helpers use a
+    # softmig_ prefix and must never be exported.
+    grep -hE '^(CUresult|nvmlReturn_t)[[:space:]]+(cu|nvml)[A-Z][A-Za-z0-9_]*[[:space:]]*\(' \
       "$SRC_DIR"/cuda/*.c "$SRC_DIR"/nvml/*.c "$SRC_DIR"/utils.c "$SRC_DIR"/libsoftmig.c \
       "$SRC_DIR"/multiprocess/*.c 2>/dev/null | \
-      sed -E 's/^(CUresult|nvmlReturn_t|void|int)[[:space:]]+([A-Za-z0-9_]+).*/\2/' ;
+      sed -E 's/^(CUresult|nvmlReturn_t)[[:space:]]+([A-Za-z0-9_]+).*/\2/' ;
     # Always-exported bootstrap symbols:
     echo dlsym
     echo cuMemGetInfo

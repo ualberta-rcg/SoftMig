@@ -26,24 +26,26 @@ fi
 init_ok=$(grep -c "Initializing\.\.\.\.\." "$slog")
 reg_ok=$(grep -c "set_task_pid: Found current process PID" "$slog")
 err_cnt=$(grep -c "softmig ERROR" "$slog")
+unhooked=$(grep -c "UNHOOKED" "$slog")
 
 if [ "${SLICE}" = "l40s" ]; then
-    # Full-GPU passive job: no config file, library must stay passive but
-    # still initialize and register the PID.
+    # Full-GPU passive job: no config file. The library must decide "passive"
+    # and then do nothing at all: no init, no PID registration, no shared
+    # region (those lines appearing means SoftMig state was touched).
     cfg_ok=$(grep -c "softmig disabled (passive mode)" "$slog")
-    metric="init=${init_ok} passive=${cfg_ok} reg=${reg_ok} err=${err_cnt}"
-    if [ "$init_ok" -ge 1 ] && [ "$cfg_ok" -ge 1 ] && [ "$reg_ok" -ge 1 ]; then
-        _emit "$jid" PASS "$reg_ok" "$metric"
+    metric="passive=${cfg_ok} init=${init_ok} reg=${reg_ok} err=${err_cnt} unhooked=${unhooked}"
+    if [ "$cfg_ok" -ge 1 ] && [ "$init_ok" -eq 0 ] && [ "$reg_ok" -eq 0 ] && [ "$unhooked" -eq 0 ]; then
+        _emit "$jid" PASS "$cfg_ok" "$metric"
     else
-        _emit "$jid" FAIL "$reg_ok" "$metric"
+        _emit "$jid" FAIL "$cfg_ok" "$metric"
     fi
     exit 0
 fi
 
 cfg_ok=$(grep -c "Read CUDA_DEVICE_MEMORY_LIMIT=" "$slog")
-metric="init=${init_ok} cfg=${cfg_ok} reg=${reg_ok} err=${err_cnt}"
+metric="init=${init_ok} cfg=${cfg_ok} reg=${reg_ok} err=${err_cnt} unhooked=${unhooked}"
 
-if [ "$init_ok" -ge 1 ] && [ "$cfg_ok" -ge 1 ] && [ "$reg_ok" -ge 1 ]; then
+if [ "$init_ok" -ge 1 ] && [ "$cfg_ok" -ge 1 ] && [ "$reg_ok" -ge 1 ] && [ "$unhooked" -eq 0 ]; then
     _emit "$jid" PASS "$reg_ok" "$metric"
 else
     _emit "$jid" FAIL "$reg_ok" "$metric"

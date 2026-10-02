@@ -38,6 +38,7 @@
 #include "include/log_utils.h"
 #include "include/nvml_override.h"
 #include "include/process_utils.h"
+#include "include/softmig_mode.h"
 
 // Defined in multiprocess_memory_limit.c. 0 = OOM killer disabled (default),
 // 1 = legacy active/gradual OOM killer enabled via SOFTMIG_ENABLE_OOM_KILLER.
@@ -171,7 +172,11 @@ int get_used_gpu_utilization(int *userutil) {
         continue;
       userutil[cudadev] = 0;
       nvmlDevice_t device;
-      CHECK_NVML_API(nvmlDeviceGetHandleByIndex(cudadev, &device));
+      nvmlReturn_t hres = nvmlDeviceGetHandleByIndex(cudadev, &device);
+      if (hres != NVML_SUCCESS) {
+        LOG_WARN("get_used_gpu_utilization: nvmlDeviceGetHandleByIndex(%d) failed: %d", cudadev, hres);
+        continue;
+      }
 
       //Get Memory for container
       nvmlReturn_t res = nvmlDeviceGetComputeRunningProcesses_v2(device,&infcount,infos);
@@ -373,12 +378,15 @@ void* utilization_watcher() {
 }
 
 void init_utilization_watcher() {
-    LOG_DEBUG("init_utilization_watcher: core utilization limit set to %d%%",get_current_device_sm_limit(0));
+    int sm_limit = get_current_device_sm_limit(0);
+    LOG_DEBUG("init_utilization_watcher: core utilization limit set to %d%%", sm_limit);
+    // 0 and >=100 both mean "no SM limit" (passive mode reports 100).
+    if (softmig_is_passive() || sm_limit <= 0 || sm_limit >= 100) {
+        return;
+    }
     setspec();
     pthread_t tid;
-    if ((get_current_device_sm_limit(0)<=100) && (get_current_device_sm_limit(0)>0)){
-        pthread_create(&tid, NULL, utilization_watcher, NULL);
-    }
+    pthread_create(&tid, NULL, utilization_watcher, NULL);
     return;
 }
 

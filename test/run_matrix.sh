@@ -50,9 +50,9 @@ printf 'cuda_ver\tslice\tsuite\tjobid\tstatus\tmetric\tdetail\n' > "$TSV"
 VERSIONS=(12.2 12.6 12.9 13.2)
 SLICES=(l40s.2 l40s.4)
 FULLGPU_SLICES=(l40s)
-PER_VER_SUITES=(smoke direct sm oom crossjob pool)
+PER_VER_SUITES=(smoke direct sm oom crossjob pool passive)
 # Suites that make sense without a config file (passive full-GPU jobs).
-FULLGPU_SUITES=(smoke direct pool)
+FULLGPU_SUITES=(smoke direct pool passive)
 
 echo "Matrix root: $ROOT"
 echo "Versions   : ${VERSIONS[*]}"

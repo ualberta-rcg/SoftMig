@@ -38,6 +38,7 @@
 #include "include/process_utils.h"
 #include "include/memory_limit.h"
 #include "multiprocess/multiprocess_memory_limit.h"
+#include "include/softmig_mode.h"
 
 // Note: We need to bypass the hook to get ALL processes, then filter ourselves
 // This ensures we don't miss any processes due to hook filtering or buffer limits
@@ -77,28 +78,12 @@ int env_utilization_switch;
 int enable_active_oom_killer;
 size_t context_size;
 size_t initial_offset=0;
-// Flag to track if softmig is disabled (when env vars are not set)
-static int softmig_disabled = -1;  // -1 = not checked yet, 0 = enabled, 1 = disabled
-
-// External function from config_file.c - reads from config file or env
-extern int is_softmig_configured(void);
-
 // External function from config_file.c - returns 1 if SOFTMIG_ENABLE_OOM_KILLER
 // is set (env or per-job config), 0 otherwise. Default is OOM killer disabled.
 extern int get_softmig_oom_killer_enabled(void);
 
-// Helper function to check if softmig is enabled
 static int is_softmig_enabled(void) {
-    if (softmig_disabled == -1) {
-        // First time check - see if environment variables are configured
-        if (!is_softmig_configured()) {
-            softmig_disabled = 1;
-            LOG_DEBUG("softmig: CUDA_DEVICE_MEMORY_LIMIT and CUDA_DEVICE_SM_LIMIT not set - softmig disabled (passive mode)");
-            return 0;
-        }
-        softmig_disabled = 0;
-    }
-    return (softmig_disabled == 0);
+    return !softmig_is_passive();
 }
 //lock for record kernel time
 pthread_mutex_t _kernel_mutex;
@@ -998,10 +983,22 @@ void exit_handler() {
 }
 
 
+// owner_pid in the shared region is per process, so threads of one process
+// (main + utilization watcher) must serialize locally first. Otherwise a
+// waiting thread sees owner_pid == getpid(), treats it as a stale lock and
+// steals it from its own sibling thread, letting two threads edit the
+// process table at once. Re-entrant per thread.
+static pthread_mutex_t shrreg_local_mutex = PTHREAD_MUTEX_INITIALIZER;
+static __thread int shrreg_lock_depth = 0;
+
 void lock_shrreg() {
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return;
     }
+    if (shrreg_lock_depth++ > 0) {
+        return;
+    }
+    pthread_mutex_lock(&shrreg_local_mutex);
     shared_region_t* region = region_info.shared_region;
     int trials = 0;
     while (1) {
@@ -1024,7 +1021,7 @@ void lock_shrreg() {
                 if (0 == fix_lock_shrreg()) break;
             }
             if (trials > SEM_WAIT_RETRY_TIMES) {
-                LOG_WARN("Lock shrreg timeout after %ds, forcing recovery (owner=%ld)",
+                LOG_ERROR("Lock shrreg timeout after %ds, forcing recovery (owner=%ld)",
                     trials * SEM_WAIT_TIME, (long)current_owner);
                 region->owner_pid = region_info.pid;
                 if (0 == fix_lock_shrreg()) break;
@@ -1040,6 +1037,13 @@ void unlock_shrreg() {
     if (!is_softmig_enabled() || region_info.shared_region == NULL) {
         return;  // No-op when softmig is disabled
     }
+    if (shrreg_lock_depth <= 0) {
+        LOG_WARN("unlock_shrreg without matching lock_shrreg");
+        return;
+    }
+    if (--shrreg_lock_depth > 0) {
+        return;
+    }
     SEQ_POINT_MARK(SEQ_BEFORE_UNLOCK_SHRREG);
     shared_region_t* region = region_info.shared_region;
 
@@ -1050,6 +1054,7 @@ void unlock_shrreg() {
 
     sem_post(&region->sem);
     SEQ_POINT_MARK(SEQ_RELEASE_SEMLOCK_OK);
+    pthread_mutex_unlock(&shrreg_local_mutex);
 }
 
 
@@ -1062,18 +1067,17 @@ int clear_proc_slot_nolock(int do_clear) {
     shared_region_t* region = region_info.shared_region;
     while (slot < region->proc_num) {
         int32_t pid = region->procs[slot].pid;
-        if (pid != 0) {
-            if (do_clear > 0 && proc_alive(pid) == PROC_STATE_NONALIVE) {
-                LOG_WARN("Kick dead proc %d", pid);
-            } else {
-                slot++;
-                continue;
-            }
-            res=1;
-            region->proc_num--;
-            region->procs[slot] = region->procs[region->proc_num];
-            __sync_synchronize();
+        // pid 0 is an empty/corrupt slot; drop it like a dead process
+        // (leaving it in place used to spin here forever with the lock held).
+        if (pid != 0 && !(do_clear > 0 && proc_alive(pid) == PROC_STATE_NONALIVE)) {
+            slot++;
+            continue;
         }
+        LOG_WARN("Kick %s proc slot %d (pid %d)", pid == 0 ? "empty" : "dead", slot, pid);
+        res=1;
+        region->proc_num--;
+        region->procs[slot] = region->procs[region->proc_num];
+        __sync_synchronize();
     }
     return res;
 }
@@ -1085,8 +1089,13 @@ void init_proc_slot_withlock() {
     if (region->proc_num >= SHARED_REGION_MAX_PROCESS_NUM) {
         exit_withlock(-1);
     }
-    signal(SIGUSR2,sig_swap_stub);
-    signal(SIGUSR1,sig_restore_stub);
+    // SIGUSR1/2 are commonly used by jobs (e.g. sbatch --signal=USR1@60 for
+    // checkpointing). Only take them over for the legacy suspend/resume path
+    // (shrreg_tool), which is bundled with the opt-in OOM killer.
+    if (enable_active_oom_killer) {
+        signal(SIGUSR2,sig_swap_stub);
+        signal(SIGUSR1,sig_restore_stub);
+    }
     // If, by any means a pid of itself is found in region->proces, then it is probably caused by crashloop
     // we need to reset it.
     int i,found=0;
@@ -1114,6 +1123,9 @@ void init_proc_slot_withlock() {
 void child_reinit_flag() {
     LOG_DEBUG("Detect child pid: %d -> %d", region_info.pid, getpid());   
     region_info.init_status = PTHREAD_ONCE_INIT;
+    // Only the forking thread survives; a lock another thread held is gone.
+    pthread_mutex_init(&shrreg_local_mutex, NULL);
+    shrreg_lock_depth = 0;
 }
 
 void try_create_shrreg() {
@@ -1334,6 +1346,7 @@ int set_current_device_sm_limit_scale(int dev, int scale) {
     if (region_info.shared_region->sm_init_flag==1) return 0;
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
+        return 0;
     }
     region_info.shared_region->sm_limit[dev]=region_info.shared_region->sm_limit[dev]*scale;
     region_info.shared_region->sm_init_flag = 1;
@@ -1347,6 +1360,7 @@ int get_current_device_sm_limit(int dev) {
     }
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
+        return 0;
     }
     return region_info.shared_region->sm_limit[dev];
 }
@@ -1358,6 +1372,7 @@ int set_current_device_memory_limit(const int dev,size_t newlimit) {
     }
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
+        return 0;
     }
     LOG_DEBUG("dev %d new limit set to %ld",dev,newlimit);
     region_info.shared_region->limit[dev]=newlimit;
@@ -1371,6 +1386,7 @@ uint64_t get_current_device_memory_limit(const int dev) {
     }
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
+        return 0;
     }
     return region_info.shared_region->limit[dev];       
 }
@@ -1382,6 +1398,7 @@ uint64_t get_current_device_memory_monitor(const int dev) {
     }
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
+        return 0;
     }
     uint64_t result = get_gpu_memory_monitor(dev);
     return result;
@@ -1395,6 +1412,7 @@ uint64_t get_current_device_memory_usage(const int dev) {
     }
     if (dev < 0 || dev >= CUDA_DEVICE_MAX_COUNT) {
         LOG_ERROR("Illegal device id: %d", dev);
+        return 0;
     }
     result = get_gpu_memory_usage(dev);
     return result;

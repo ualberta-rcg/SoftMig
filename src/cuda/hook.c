@@ -10,7 +10,7 @@
 #include "include/libcuda_hook.h"
 #include <string.h>
 #include "include/libsoftmig.h"
-#include "include/multi_func_hook.h"
+#include "include/dlsym_resolve.h"
 
 
 typedef void* (*fp_dlsym)(void*, const char*);
@@ -181,7 +181,19 @@ cuda_entry_t cuda_library_entry[] = {
 
     {.name = "cuGetProcAddress"},
     {.name = "cuGetProcAddress_v2"},
+
+    {.name = "cuLaunchKernelEx"},
+    {.name = "cuLaunchKernel_ptsz"},
+    {.name = "cuLaunchKernelEx_ptsz"},
+    {.name = "cuLaunchCooperativeKernel_ptsz"},
+    {.name = "cuGraphLaunch_ptsz"},
+    {.name = "cuMemAllocAsync_ptsz"},
+    {.name = "cuMemFreeAsync_ptsz"},
+    {.name = "cuMemAllocFromPoolAsync_ptsz"},
 };
+
+_Static_assert(sizeof(cuda_library_entry) / sizeof(cuda_library_entry[0]) == CUDA_ENTRY_END,
+               "cuda_library_entry[] must match cuda_override_enum_t entry for entry");
 
 int prior_function(char tmp[500]) {
     char *pos = tmp + strlen(tmp) - 3;
@@ -195,13 +207,16 @@ int prior_function(char tmp[500]) {
     return 0;
 }
 
+/* 1 if cuda_library_entry[i] was resolved under its own name (not via the
+ * prior-version fallback), so its real pointer has exactly that entry's ABI. */
+static unsigned char cuda_entry_exact[CUDA_ENTRY_END];
+
 /** Resolve all CUDA driver symbols from libcuda.so.1 into cuda_library_entry[]. */
 void load_cuda_libraries() {
     void *table = NULL;
     int i = 0;
     char cuda_filename[FILENAME_MAX];
     char tmpfunc[500];
-
 
     snprintf(cuda_filename, FILENAME_MAX - 1, "%s","libcuda.so.1");
     cuda_filename[FILENAME_MAX - 1] = '\0';
@@ -212,149 +227,155 @@ void load_cuda_libraries() {
     }
 
     for (i = 0; i < CUDA_ENTRY_END; i++) {
-        cuda_library_entry[i].fn_ptr = real_dlsym(table, cuda_library_entry[i].name);
+        // Never look up with a NULL handle: RTLD_DEFAULT would find our own
+        // exported wrapper and every call through the table would recurse.
+        cuda_library_entry[i].fn_ptr = table ? real_dlsym(table, cuda_library_entry[i].name) : NULL;
         if (!cuda_library_entry[i].fn_ptr) {
             cuda_library_entry[i].fn_ptr=real_dlsym(RTLD_NEXT,cuda_library_entry[i].name);
-            if (!cuda_library_entry[i].fn_ptr){
-                LOG_DEBUG("can't find function %s in %s", cuda_library_entry[i].name,cuda_filename);
-                memset(tmpfunc,0,500);
-                strcpy(tmpfunc,cuda_library_entry[i].name);
-                while (prior_function(tmpfunc)) {
-                    cuda_library_entry[i].fn_ptr=real_dlsym(RTLD_NEXT,tmpfunc);
-                    if (cuda_library_entry[i].fn_ptr) {
-                        LOG_INFO("found prior function %s",tmpfunc);
-                        break;
-                    } 
-                }
+        }
+        if (cuda_library_entry[i].fn_ptr) {
+            cuda_entry_exact[i] = 1;
+            continue;
+        }
+        LOG_DEBUG("can't find function %s in %s", cuda_library_entry[i].name,cuda_filename);
+        memset(tmpfunc,0,500);
+        strcpy(tmpfunc,cuda_library_entry[i].name);
+        while (prior_function(tmpfunc)) {
+            cuda_library_entry[i].fn_ptr=real_dlsym(RTLD_NEXT,tmpfunc);
+            if (cuda_library_entry[i].fn_ptr) {
+                LOG_INFO("found prior function %s",tmpfunc);
+                break;
             }
         }
     }
     if (cuda_library_entry[0].fn_ptr==NULL){
         LOG_WARN("is NULL");
     }
-    dlclose(table);
+    if (table) {
+        dlclose(table);
+    }
 }
 
+volatile int softmig_cuda_table_ready = 0;
+static pthread_once_t cuda_table_once = PTHREAD_ONCE_INIT;
 
-// find func by cuda version
-const char* get_real_func_name(const char* base_name,int cuda_version) {
-  int i = 0;
-  for (i = 0; i < sizeof(g_func_map)/sizeof(g_func_map[0]); ++i) {
-    CudaFuncMapEntry *entry = &g_func_map[i];
-    // check fun name
-    if (strcmp(entry->func_name, base_name) != 0) continue;
-    // check cuda version
-    if (cuda_version >= entry->min_ver && cuda_version <= entry->max_ver) {
-      return entry->real_name;
+static void cuda_table_load_once(void) {
+    if (real_dlsym == NULL) {
+        real_dlsym = resolve_real_dlsym();
     }
-  }
-  return NULL; // if not found
+    load_cuda_libraries();
+    __sync_synchronize();
+    softmig_cuda_table_ready = 1;
 }
 
-void* find_real_symbols_in_table(const char *symbol) {
-  void *pfn;
-  //this symbol always has suffix like _v2,_v3
-  pfn = __dlsym_hook_section(NULL,symbol);
-  if (pfn!=NULL) {
-    return pfn;
-  }
-  return NULL;
+/** Populate cuda_library_entry[] exactly once (safe from any entry point). */
+void softmig_ensure_cuda_table(void) {
+    pthread_once(&cuda_table_once, cuda_table_load_once);
 }
 
-void *find_symbols_in_table(const char *symbol) {
-    char symbol_v[500];
-    void *pfn;
-    strcpy(symbol_v,symbol);
-    strcat(symbol_v,"_v3");
-    pfn = __dlsym_hook_section(NULL,symbol_v);
-    if (pfn!=NULL) {
-        return pfn;
+/*
+ * Runtime hook audit. Enforcement only works if every allocation, free,
+ * launch and memory-report entry point the app actually uses is hooked. When
+ * a lookup for one of those resolves to the raw driver function instead, log
+ * it (file only) so smoke tests and admins can spot driver/toolkit drift.
+ */
+static const char *const unhooked_watch[] = {
+    "cuMemAlloc", "cuMemCreate", "cuMemFree", "cuArrayCreate", "cuArray3DCreate",
+    "cuMipmappedArrayCreate", "cuLaunch", "cuGraphLaunch", "cuGraphAddMemAllocNode",
+    "cuMemGetInfo", "cuDeviceTotalMem",
+    "nvmlDeviceGetComputeRunningProcesses", "nvmlDeviceGetGraphicsRunningProcesses",
+    "nvmlDeviceGetMPSComputeRunningProcesses", "nvmlDeviceGetMemoryInfo",
+    "nvmlDeviceGetProcessUtilization", "nvmlDeviceGetProcessesUtilizationInfo",
+    "nvmlDeviceGetRunningProcessDetailList",
+    NULL};
+/* Known, documented gaps (see docs/TROUBLESHOOTING.md): host-side callbacks,
+ * the deprecated multi-device cooperative launch, graph memory nodes, and
+ * pinned host allocations (not device memory). */
+static const char *const unhooked_ack[] = {
+    "cuLaunchHostFunc", "cuLaunchCooperativeKernelMultiDevice", "cuGraphAddMemAllocNode",
+    "cuMemAllocHost", "cuMemFreeHost", "cuMemAllocManaged_ptsz",
+    NULL};
+/* Exact names: pre-CUDA-3.2 ABI (cuda.h maps these to _v2 since 3.2, and
+ * cuGetProcAddress only returns them for cudaVersion < 3020) and the legacy
+ * cuFuncSetBlockShape-era launch calls. */
+static const char *const unhooked_legacy[] = {
+    "cuMemAlloc", "cuMemFree", "cuMemAllocPitch", "cuArrayCreate", "cuArray3DCreate",
+    "cuDeviceTotalMem", "cuMemGetInfo", "cuLaunch", "cuLaunchGrid", "cuLaunchGridAsync",
+    NULL};
+
+static int has_prefix_in(const char *symbol, const char *const *list) {
+    for (int i = 0; list[i]; i++) {
+        if (strncmp(symbol, list[i], strlen(list[i])) == 0) {
+            return 1;
+        }
     }
-    symbol_v[strlen(symbol_v)-1]='2';
-    pfn = __dlsym_hook_section(NULL,symbol_v);
-    if (pfn!=NULL) {
-        return pfn;
+    return 0;
+}
+
+static int has_exact_in(const char *symbol, const char *const *list) {
+    for (int i = 0; list[i]; i++) {
+        if (strcmp(symbol, list[i]) == 0) {
+            return 1;
+        }
     }
-    pfn = __dlsym_hook_section(NULL,symbol);
-    if (pfn!=NULL) {
-        return pfn;
+    return 0;
+}
+
+void softmig_note_unhooked(const char *symbol, const char *via) {
+    if (symbol == NULL || !has_prefix_in(symbol, unhooked_watch) || has_prefix_in(symbol, unhooked_ack) ||
+        has_exact_in(symbol, unhooked_legacy)) {
+        return;
+    }
+    log_to_file_only("UNHOOKED", "%s resolved to the raw driver via %s", symbol, via);
+}
+
+/*
+ * cuGetProcAddress: ask the real driver first, so the returned pointer has
+ * the ABI the caller asked for (cudaVersion) and the right default-stream
+ * semantics (flags, e.g. PER_THREAD_DEFAULT_STREAM -> *_ptsz). Then swap in
+ * our hook only if that exact driver function is one we hook. No guessing of
+ * _v2/_v3 names, so a hook can never be handed out with the wrong signature.
+ */
+static void *softmig_gpa_hook_for(void *real) {
+    if (real == NULL) {
+        return NULL;
+    }
+    for (int i = 0; i < CUDA_ENTRY_END; i++) {
+        if (cuda_entry_exact[i] && cuda_library_entry[i].fn_ptr == real) {
+            void *hook = __dlsym_hook_section(NULL, cuda_library_entry[i].name);
+            if (hook != NULL) {
+                return hook;
+            }
+        }
     }
     return NULL;
 }
 
-void *find_symbols_in_table_by_cudaversion(const char *symbol,int  cudaVersion) {
-  void *pfn;
-  const char *real_symbol;
-  real_symbol = get_real_func_name(symbol,cudaVersion);
-  if (real_symbol == NULL) {
-    // if not find in mulit func version def, use origin logic
-    pfn = find_symbols_in_table(symbol);
-  } else {
-    pfn = find_real_symbols_in_table(real_symbol);
-  }
-  return pfn;
-}
-
-
-CUresult (*cuGetProcAddress_real) ( const char* symbol, void** pfn, int  cudaVersion, cuuint64_t flags ); 
-
-CUresult _cuGetProcAddress ( const char* symbol, void** pfn, int  cudaVersion, cuuint64_t flags ) {
-    *pfn = find_symbols_in_table_by_cudaversion(symbol, cudaVersion);
-    if (*pfn==NULL){
-        CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuGetProcAddress,symbol,pfn,cudaVersion,flags);
+static CUresult softmig_gpa_finish(const char *symbol, void **pfn, CUresult res) {
+    if (res != CUDA_SUCCESS || pfn == NULL || *pfn == NULL) {
         return res;
-    }else{
-        LOG_DEBUG("found symbol %s",symbol);
-        return CUDA_SUCCESS;
     }
+    void *hook = softmig_gpa_hook_for(*pfn);
+    if (hook != NULL) {
+        LOG_DEBUG("cuGetProcAddress: %s -> hook", symbol);
+        *pfn = hook;
+    } else {
+        softmig_note_unhooked(symbol, "cuGetProcAddress");
+    }
+    return res;
 }
 
 CUresult cuGetProcAddress ( const char* symbol, void** pfn, int  cudaVersion, cuuint64_t flags ) {
-    *pfn = find_symbols_in_table_by_cudaversion(symbol, cudaVersion);
-    if (strcmp(symbol,"cuGetProcAddress")==0) {
-        CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuGetProcAddress,symbol,pfn,cudaVersion,flags); 
-        if (res==CUDA_SUCCESS) {
-            cuGetProcAddress_real=*pfn;
-            *pfn=_cuGetProcAddress;
-        }
-        return res;
+    if (CUDA_FIND_ENTRY(cuda_library_entry, cuGetProcAddress) == NULL) {
+        return cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, NULL);
     }
-    if (*pfn==NULL){
-        CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuGetProcAddress,symbol,pfn,cudaVersion,flags);
-        return res;
-    }else{
-        LOG_DEBUG("found symbol %s",symbol);
-        return CUDA_SUCCESS;
-    }
-}
-
-CUresult _cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion, cuuint64_t flags, CUdriverProcAddressQueryResult *symbolStatus){
-    *pfn = find_symbols_in_table_by_cudaversion(symbol, cudaVersion);
-    if (*pfn==NULL){
-        CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuGetProcAddress_v2,symbol,pfn,cudaVersion,flags,symbolStatus);
-        return res;
-    }else{
-        LOG_DEBUG("found symbol %s",symbol);
-        return CUDA_SUCCESS;
-    } 
+    SOFTMIG_PASSIVE_FORWARD(cuGetProcAddress, symbol, pfn, cudaVersion, flags);
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry, cuGetProcAddress, symbol, pfn, cudaVersion, flags);
+    return softmig_gpa_finish(symbol, pfn, res);
 }
 
 CUresult cuGetProcAddress_v2(const char *symbol, void **pfn, int cudaVersion, cuuint64_t flags, CUdriverProcAddressQueryResult *symbolStatus){
-    *pfn = find_symbols_in_table_by_cudaversion(symbol, cudaVersion);
-    if (strcmp(symbol,"cuGetProcAddress_v2")==0) {
-        CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuGetProcAddress_v2,symbol,pfn,cudaVersion,flags,symbolStatus); 
-        if (res==CUDA_SUCCESS) {
-            cuGetProcAddress_real=*pfn;
-            *pfn=_cuGetProcAddress_v2;
-        }
-        return res;
-    }
-    if (*pfn==NULL){
-        CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuGetProcAddress_v2,symbol,pfn,cudaVersion,flags,symbolStatus);
-        return res;
-    }else{
-        LOG_DEBUG("found symbol %s",symbol);
-        void *optr;
-        return CUDA_OVERRIDE_CALL(cuda_library_entry,cuGetProcAddress_v2,symbol,&optr,cudaVersion,flags,symbolStatus);
-    } 
+    SOFTMIG_PASSIVE_FORWARD(cuGetProcAddress_v2, symbol, pfn, cudaVersion, flags, symbolStatus);
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry, cuGetProcAddress_v2, symbol, pfn, cudaVersion, flags, symbolStatus);
+    return softmig_gpa_finish(symbol, pfn, res);
 }

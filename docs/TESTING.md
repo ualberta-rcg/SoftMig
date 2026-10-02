@@ -56,4 +56,21 @@ srun --partition=gpu --gres=gpu:l40s.4:1 --time=0:02:00 bash -lc 'nvidia-smi --q
 Notes:
 
 - In production deployments, limits are expected to come from `/var/run/softmig/*.conf` (created by prolog).
+- Inside a SLURM job the `CUDA_DEVICE_*` environment variables are ignored; the
+  examples above that export them only enable SoftMig outside SLURM.
 - `LD_PRELOAD` is intended for development/testing.
+
+## Cluster test matrix (softmig reservation)
+
+`test/run_matrix.sh` runs every suite for CUDA 12.2/12.6/12.9/13.2 on slice
+and full-GPU allocations and writes `test_results/matrix_<ts>/summary.tsv`.
+The `passive` suite runs `build/test/passive_probe`: in a full-GPU job every
+`dlsym`/`cuGetProcAddress` result must be the driver's own function, async
+alloc/free through the per-thread stream must work, and no shared region or
+signal handler may appear; in a slice job the same probe must see hooks.
+`test/jax_cuda_async.sh` is the JAX `cuda_async` end-to-end check.
+
+`test/audit_hooks.sh [libsoftmig.so]` (on a GPU node) compares the driver's
+exported entry points with SoftMig's hooks and exits non-zero if a memory,
+launch, meminfo or NVML process-query entry point is unhooked and not on the
+acknowledged list. Run it after every driver upgrade.

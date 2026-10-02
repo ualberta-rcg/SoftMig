@@ -18,6 +18,7 @@
 #include "include/process_utils.h"
 #include "include/nvml_cache.h"
 #include "multiprocess/multiprocess_memory_limit.h"
+#include "include/softmig_mode.h"
 
 extern entry_t cuda_library_entry[];
 extern entry_t nvml_library_entry[];
@@ -36,42 +37,75 @@ nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v3(nvmlDevice_t device,
                                                      unsigned int *infoCount,
                                                      nvmlProcessInfo_t *infos);
 
-/** Keep processes that share this job's cgroup (UID fallback if cgroup unknown). */
+/** 1 if pid shares this job's cgroup (UID fallback if the cgroup is unknown). */
+static int softmig_pid_visible(unsigned int pid) {
+  if (pid == 0) return 0;
+  int cgroup_check = proc_belongs_to_current_cgroup_session(pid);
+  if (cgroup_check == 1) return 1;
+  if (cgroup_check == 0) {
+    LOG_DEBUG("PID %u - different cgroup, skipping", pid);
+    return 0;
+  }
+  uid_t current_uid = getuid();
+  if (current_uid == 0) return 1;
+  uid_t proc_uid = proc_get_uid(pid);
+  return proc_uid != (uid_t)-1 && proc_uid == current_uid;
+}
+
+/** Copy visible entries (up to max_output) and return how many are visible in total. */
 static unsigned int filter_nvml_process_infos(const nvmlProcessInfo_t *all_infos,
                                                 unsigned int temp_count,
                                                 nvmlProcessInfo_t *infos,
                                                 unsigned int max_output) {
-  uid_t current_uid = getuid();
   unsigned int filtered_count = 0;
   for (unsigned int i = 0; i < temp_count; i++) {
-    unsigned int actual_pid = all_infos[i].pid;
-    if (actual_pid == 0) continue;
-
-    int cgroup_check = proc_belongs_to_current_cgroup_session(actual_pid);
-    int should_include = 0;
-
-    if (cgroup_check == 1) {
-      should_include = 1;
-    } else if (cgroup_check == 0) {
-      LOG_DEBUG("PID %u - different cgroup, skipping", actual_pid);
-    } else if (cgroup_check == -1) {
-      if (current_uid == 0) {
-        should_include = 1;
-      } else {
-        uid_t proc_uid = proc_get_uid(actual_pid);
-        if (proc_uid != (uid_t)-1 && proc_uid == current_uid)
-          should_include = 1;
-      }
-    }
-
-    if (should_include) {
-      if (infos != NULL && filtered_count < max_output)
-        infos[filtered_count] = all_infos[i];
-      filtered_count++;
-      if (filtered_count >= max_output && infos != NULL) break;
-    }
+    if (!softmig_pid_visible(all_infos[i].pid)) continue;
+    if (infos != NULL && filtered_count < max_output)
+      infos[filtered_count] = all_infos[i];
+    filtered_count++;
   }
   return filtered_count;
+}
+
+typedef nvmlReturn_t (*softmig_proc_list_fn)(nvmlDevice_t, unsigned int *, nvmlProcessInfo_t *);
+
+/*
+ * Shared body of the filtered process-list hooks. Follows NVML's sizing
+ * contract on the filtered list: if the caller's buffer is too small
+ * (including the NULL/0 size query), return INSUFFICIENT_SIZE with the
+ * needed count; otherwise SUCCESS with the number written.
+ */
+static nvmlReturn_t softmig_filtered_process_list(softmig_proc_list_fn real, const char *name,
+                                                  nvmlDevice_t device, unsigned int *infoCount,
+                                                  nvmlProcessInfo_t *infos) {
+  if (infoCount == NULL) {
+    return NVML_ERROR_INVALID_ARGUMENT;
+  }
+  if (real == NULL) {
+    return NVML_ERROR_FUNCTION_NOT_FOUND;
+  }
+  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
+  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
+  nvmlReturn_t ret = real(device, &temp_count, all_infos);
+  if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
+    LOG_WARN("%s: NVML reports %u processes, buffer holds %u; some may be missing",
+             name, temp_count, SHARED_REGION_MAX_PROCESS_NUM);
+    if (temp_count > SHARED_REGION_MAX_PROCESS_NUM) temp_count = SHARED_REGION_MAX_PROCESS_NUM;
+  } else if (ret != NVML_SUCCESS) {
+    *infoCount = 0;
+    return ret;
+  }
+  unsigned int capacity = (infos == NULL) ? 0 : *infoCount;
+  unsigned int needed = filter_nvml_process_infos(all_infos, temp_count, infos, capacity);
+  *infoCount = needed;
+  return (needed > capacity) ? NVML_ERROR_INSUFFICIENT_SIZE : NVML_SUCCESS;
+}
+
+static void invalidate_nvml_cache_for(nvmlDevice_t device) {
+  unsigned int dev_idx;
+  if (NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetIndex, device, &dev_idx) == NVML_SUCCESS) {
+    nvml_cache_invalidate((int)dev_idx);
+  }
 }
 
 nvmlReturn_t nvmlShutdown(void) {
@@ -95,9 +129,23 @@ nvmlReturn_t nvmlDeviceGetComputeRunningProcesses(nvmlDevice_t device,
 nvmlReturn_t nvmlDeviceGetProcessUtilization(
     nvmlDevice_t device, nvmlProcessUtilizationSample_t *utilization,
     unsigned int *processSamplesCount, unsigned long long lastSeenTimeStamp) {
-  return NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetProcessUtilization,
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetProcessUtilization, device, utilization,
+                               processSamplesCount, lastSeenTimeStamp);
+  nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetProcessUtilization,
                          device, utilization, processSamplesCount,
                          lastSeenTimeStamp);
+  // Filter in place; a size query (NULL buffer) keeps the driver's upper bound.
+  if (ret != NVML_SUCCESS || utilization == NULL || processSamplesCount == NULL) {
+    return ret;
+  }
+  unsigned int kept = 0;
+  for (unsigned int i = 0; i < *processSamplesCount; i++) {
+    if (softmig_pid_visible(utilization[i].pid)) {
+      utilization[kept++] = utilization[i];
+    }
+  }
+  *processSamplesCount = kept;
+  return ret;
 }
 
 nvmlReturn_t nvmlDeviceClearAccountingPids(nvmlDevice_t device) {
@@ -1509,118 +1557,133 @@ nvmlComputeInstanceGetInfo_v2(nvmlComputeInstance_t computeInstance,
 }
 
 /**
- * Hooked nvmlDeviceGetComputeRunningProcesses_v2 — filters by cgroup/UID.
- *
- * Fetches the full process list from NVML, then returns only processes
- * belonging to the current cgroup session or UID. Root sees all processes.
+ * Hooked process-list queries — filtered to this job's cgroup (UID fallback).
+ * Driver 535+ (including 595) nvidia-smi dlsyms the _v3 names; all four use
+ * the same nvmlProcessInfo_t ABI as v2. Root outside a cgroup sees all.
  */
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v2(nvmlDevice_t device,
                                                      unsigned int *infoCount,
                                                      nvmlProcessInfo_t *infos) {
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetComputeRunningProcesses_v2, device, infoCount, infos);
   // External tools (nvidia-smi) call this; invalidate our cache so internal
   // callers pick up the fresh data on their next query.
-  unsigned int dev_idx_for_invalidate;
-  if (NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetIndex,
-                         device, &dev_idx_for_invalidate) == NVML_SUCCESS) {
-    nvml_cache_invalidate((int)dev_idx_for_invalidate);
-  }
-
-  // Get all processes first
-  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
-  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
-  
-  nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
-                         nvmlDeviceGetComputeRunningProcesses_v2, device,
-                         &temp_count, all_infos);
-  
-  if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
-    LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v2: Buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.", 
-             temp_count, SHARED_REGION_MAX_PROCESS_NUM);
-  } else if (ret != NVML_SUCCESS) {
-    LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v2: NVML call failed with error %d", ret);
-    *infoCount = 0;
-    return ret;
-  }
-
-  unsigned int filtered_count = filter_nvml_process_infos(
-      all_infos, temp_count, infos, *infoCount);
-  *infoCount = filtered_count;
-  return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
+  invalidate_nvml_cache_for(device);
+  return softmig_filtered_process_list(
+      (softmig_proc_list_fn)NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v2),
+      "nvmlDeviceGetComputeRunningProcesses_v2", device, infoCount, infos);
 }
 
-/**
- * Driver 535+ (including 595) nvidia-smi dlsyms this, not _v2.
- * Same nvmlProcessInfo_t ABI as v2.
- */
 nvmlReturn_t nvmlDeviceGetComputeRunningProcesses_v3(nvmlDevice_t device,
                                                      unsigned int *infoCount,
                                                      nvmlProcessInfo_t *infos) {
-  unsigned int dev_idx_for_invalidate;
-  if (NVML_OVERRIDE_CALL(nvml_library_entry, nvmlDeviceGetIndex,
-                         device, &dev_idx_for_invalidate) == NVML_SUCCESS) {
-    nvml_cache_invalidate((int)dev_idx_for_invalidate);
-  }
-
-  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
-  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
-
-  nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
-                         nvmlDeviceGetComputeRunningProcesses_v3, device,
-                         &temp_count, all_infos);
-
-  if (ret == NVML_ERROR_INSUFFICIENT_SIZE) {
-    LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v3: Buffer too small! NVML returned %u processes but buffer size is %u. Some processes may be missing.",
-             temp_count, SHARED_REGION_MAX_PROCESS_NUM);
-  } else if (ret != NVML_SUCCESS) {
-    LOG_WARN("nvmlDeviceGetComputeRunningProcesses_v3: NVML call failed with error %d", ret);
-    *infoCount = 0;
-    return ret;
-  }
-
-  unsigned int filtered_count = filter_nvml_process_infos(
-      all_infos, temp_count, infos, *infoCount);
-  *infoCount = filtered_count;
-  return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetComputeRunningProcesses_v3, device, infoCount, infos);
+  invalidate_nvml_cache_for(device);
+  return softmig_filtered_process_list(
+      (softmig_proc_list_fn)NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetComputeRunningProcesses_v3),
+      "nvmlDeviceGetComputeRunningProcesses_v3", device, infoCount, infos);
 }
 
 nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v2(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
-  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
-  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
-  
-  nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
-                         nvmlDeviceGetGraphicsRunningProcesses_v2, device,
-                         &temp_count, all_infos);
-  
-  if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
-    *infoCount = 0;
-    return ret;
-  }
-
-  unsigned int filtered_count = filter_nvml_process_infos(
-      all_infos, temp_count, infos, *infoCount);
-  *infoCount = filtered_count;
-  return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetGraphicsRunningProcesses_v2, device, infoCount, infos);
+  return softmig_filtered_process_list(
+      (softmig_proc_list_fn)NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v2),
+      "nvmlDeviceGetGraphicsRunningProcesses_v2", device, infoCount, infos);
 }
 
 nvmlReturn_t nvmlDeviceGetGraphicsRunningProcesses_v3(
     nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
-  nvmlProcessInfo_t all_infos[SHARED_REGION_MAX_PROCESS_NUM];
-  unsigned int temp_count = SHARED_REGION_MAX_PROCESS_NUM;
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetGraphicsRunningProcesses_v3, device, infoCount, infos);
+  return softmig_filtered_process_list(
+      (softmig_proc_list_fn)NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetGraphicsRunningProcesses_v3),
+      "nvmlDeviceGetGraphicsRunningProcesses_v3", device, infoCount, infos);
+}
 
-  nvmlReturn_t ret = NVML_OVERRIDE_CALL(nvml_library_entry,
-                         nvmlDeviceGetGraphicsRunningProcesses_v3, device,
-                         &temp_count, all_infos);
+nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses_v2(
+    nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetMPSComputeRunningProcesses_v2, device, infoCount, infos);
+  return softmig_filtered_process_list(
+      (softmig_proc_list_fn)NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetMPSComputeRunningProcesses_v2),
+      "nvmlDeviceGetMPSComputeRunningProcesses_v2", device, infoCount, infos);
+}
 
-  if (ret != NVML_SUCCESS && ret != NVML_ERROR_INSUFFICIENT_SIZE) {
-    *infoCount = 0;
+nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses_v3(
+    nvmlDevice_t device, unsigned int *infoCount, nvmlProcessInfo_t *infos) {
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetMPSComputeRunningProcesses_v3, device, infoCount, infos);
+  return softmig_filtered_process_list(
+      (softmig_proc_list_fn)NVML_FIND_ENTRY(nvml_library_entry, nvmlDeviceGetMPSComputeRunningProcesses_v3),
+      "nvmlDeviceGetMPSComputeRunningProcesses_v3", device, infoCount, infos);
+}
+
+/* Layouts copied from nvml.h (CUDA 12.4+/13.x). Only v1 is filtered; an
+ * unknown struct version is passed through untouched rather than misparsed. */
+typedef struct {
+  unsigned int pid;
+  unsigned long long usedGpuMemory;
+  unsigned int gpuInstanceId;
+  unsigned int computeInstanceId;
+  unsigned long long usedGpuCcProtectedMemory;
+} softmig_nvmlProcessDetail_v1_t;
+
+typedef struct {
+  unsigned int version;
+  unsigned int mode;
+  unsigned int numProcArrayEntries;
+  softmig_nvmlProcessDetail_v1_t *procArray;
+} softmig_nvmlProcessDetailList_v1_t;
+
+typedef struct {
+  unsigned long long timeStamp;
+  unsigned int pid;
+  unsigned int smUtil, memUtil, encUtil, decUtil, jpgUtil, ofaUtil;
+} softmig_nvmlProcessUtilizationInfo_v1_t;
+
+typedef struct {
+  unsigned int version;
+  unsigned int processSamplesCount;
+  unsigned long long lastSeenTimeStamp;
+  softmig_nvmlProcessUtilizationInfo_v1_t *procUtilArray;
+} softmig_nvmlProcessesUtilizationInfo_v1_t;
+
+#define SOFTMIG_NVML_STRUCT_V1(t) ((unsigned int)(sizeof(t) | (1u << 24)))
+
+nvmlReturn_t nvmlDeviceGetRunningProcessDetailList(nvmlDevice_t device, void *plist) {
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetRunningProcessDetailList, device, plist);
+  nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetRunningProcessDetailList,
+                                               device, plist);
+  softmig_nvmlProcessDetailList_v1_t *list = plist;
+  // A size query (NULL procArray) keeps the driver's upper bound.
+  if (ret != NVML_SUCCESS || list == NULL || list->procArray == NULL ||
+      list->version != SOFTMIG_NVML_STRUCT_V1(softmig_nvmlProcessDetailList_v1_t)) {
     return ret;
   }
+  unsigned int kept = 0;
+  for (unsigned int i = 0; i < list->numProcArrayEntries; i++) {
+    if (softmig_pid_visible(list->procArray[i].pid)) {
+      list->procArray[kept++] = list->procArray[i];
+    }
+  }
+  list->numProcArrayEntries = kept;
+  return ret;
+}
 
-  unsigned int filtered_count = filter_nvml_process_infos(
-      all_infos, temp_count, infos, *infoCount);
-  *infoCount = filtered_count;
-  return (filtered_count < temp_count) ? NVML_SUCCESS : ret;
+nvmlReturn_t nvmlDeviceGetProcessesUtilizationInfo(nvmlDevice_t device, void *procesesUtilInfo) {
+  SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetProcessesUtilizationInfo, device, procesesUtilInfo);
+  nvmlReturn_t ret = NVML_OVERRIDE_CALL_NO_LOG(nvml_library_entry, nvmlDeviceGetProcessesUtilizationInfo,
+                                               device, procesesUtilInfo);
+  softmig_nvmlProcessesUtilizationInfo_v1_t *info = procesesUtilInfo;
+  if (ret != NVML_SUCCESS || info == NULL || info->procUtilArray == NULL ||
+      info->version != SOFTMIG_NVML_STRUCT_V1(softmig_nvmlProcessesUtilizationInfo_v1_t)) {
+    return ret;
+  }
+  unsigned int kept = 0;
+  for (unsigned int i = 0; i < info->processSamplesCount; i++) {
+    if (softmig_pid_visible(info->procUtilArray[i].pid)) {
+      info->procUtilArray[kept++] = info->procUtilArray[i];
+    }
+  }
+  info->processSamplesCount = kept;
+  return ret;
 }
 nvmlReturn_t nvmlDeviceSetTemperatureThreshold(
     nvmlDevice_t device, nvmlTemperatureThresholds_t thresholdType, int *temp) {

@@ -38,6 +38,49 @@ Checks on an affected node:
 - reproduce with `build/test/test_pool_free` (exit 2 = bug present,
   exit 0 = fixed); see `test/suite_pool.sh`
 
+Since 2.05 a job without a config file never reaches any of this code: the
+library hands out the driver's own functions (see the next section).
+
+## Is SoftMig active or passive in this job?
+
+With `SOFTMIG_LOG_LEVEL=2` (or higher) a passive process logs once:
+`CUDA_DEVICE_MEMORY_LIMIT and CUDA_DEVICE_SM_LIMIT not set - softmig disabled (passive mode)`.
+Other signs of passive mode: no `/tmp/cudevshr.cache.<jobid>` in the job, no
+`Initializing` / `shrreg created` lines in `/var/log/softmig/<jobid>.log`.
+`build/test/passive_probe --expect passive` (or `--expect enabled` in a slice
+job) checks it end to end; `test/suite_passive.sh` wraps it.
+
+Rule: in a Slurm job SoftMig is active only if the prolog wrote a root-owned
+`/var/run/softmig/<jobid>[_<arrayid>].conf` setting a memory or SM limit;
+environment variables are ignored. Outside Slurm, the env vars enable it.
+
+## `UNHOOKED` lines in the job log
+
+`UNHOOKED <symbol> resolved to the raw driver via dlsym|cuGetProcAddress`
+means an enabled-mode process obtained a memory/launch/meminfo/NVML
+process-query entry point that SoftMig does not wrap, so that path bypasses
+the limits (typically a new driver or CUDA release). Run
+`test/audit_hooks.sh` on the node to list them against the installed driver,
+then add hooks. Deliberately unhooked, and therefore not logged:
+
+- `cuLaunchHostFunc*` (host callbacks, no GPU work to throttle)
+- `cuLaunchCooperativeKernelMultiDevice` (deprecated, removed in CUDA 13)
+- `cuGraphAddMemAllocNode` (graph memory nodes are not limit-enforced)
+- `cuMemAllocHost`, `cuMemFreeHost`, `cuMemAllocManaged_ptsz` (host or
+  managed memory, not device memory)
+- the pre-CUDA-3.2 unversioned names (`cuMemAlloc`, `cuMemFree`,
+  `cuMemGetInfo`, `cuDeviceTotalMem`, ...) and `cuLaunch`/`cuLaunchGrid*`
+
+## Symptom: sliced jobs hang at start, `Lock shrreg timeout ... forcing recovery`
+
+Before 2.05, a thread could steal the shared-region lock from a sibling
+thread in the same process (`Owner pid equals self pid`), corrupt the
+process table, and then spin forever in `clear_proc_slot_nolock` holding the
+lock; every other CUDA/NVML process in the job (including `nvidia-smi`) then
+blocks in `nvmlInit`/`cuInit`. Fixed in 2.05. On an older build, killing the
+spinning process (100% CPU, stack in `libsoftmig.so` under
+`nvmlInitWithFlags` or `cuInit`) releases the others.
+
 ## Symptom: `nvidia-smi` shows full VRAM in a sliced job
 
 Most common causes:

@@ -22,6 +22,7 @@
 #include <cuda.h>
 #include <pthread.h>
 #include "include/log_utils.h"
+#include "include/softmig_mode.h"
 
 typedef struct {
   void *fn_ptr;
@@ -34,7 +35,14 @@ typedef CUresult (*cuda_sym_t)();
 
 #define CUDA_OVERRIDE_ENUM(x) OVERRIDE_##x
 
-#define CUDA_FIND_ENTRY(table, sym) ({ (table)[CUDA_OVERRIDE_ENUM(sym)].fn_ptr; })
+extern volatile int softmig_cuda_table_ready;
+void softmig_ensure_cuda_table(void);
+
+// Direct-linked (-lcuda) apps can reach a wrapper before any dlsym/cuInit has
+// populated the table, so load it on first use.
+#define CUDA_FIND_ENTRY(table, sym) ({                                         \
+    if (__builtin_expect(!softmig_cuda_table_ready, 0)) softmig_ensure_cuda_table(); \
+    (table)[CUDA_OVERRIDE_ENUM(sym)].fn_ptr; })
 
 #define CUDA_OVERRIDE_CALL(table, sym, ...)                                    \
   ({    \
@@ -211,6 +219,18 @@ typedef enum {
 
     CUDA_OVERRIDE_ENUM(cuGetProcAddress),
     CUDA_OVERRIDE_ENUM(cuGetProcAddress_v2),
+
+    /* Launch variants and per-thread-default-stream (_ptsz) entry points that
+     * cudart hands out when built/used with PTDS. Each _ptsz wrapper maps
+     * hStream==0 to CU_STREAM_PER_THREAD and reuses the normal hook. */
+    CUDA_OVERRIDE_ENUM(cuLaunchKernelEx),
+    CUDA_OVERRIDE_ENUM(cuLaunchKernel_ptsz),
+    CUDA_OVERRIDE_ENUM(cuLaunchKernelEx_ptsz),
+    CUDA_OVERRIDE_ENUM(cuLaunchCooperativeKernel_ptsz),
+    CUDA_OVERRIDE_ENUM(cuGraphLaunch_ptsz),
+    CUDA_OVERRIDE_ENUM(cuMemAllocAsync_ptsz),
+    CUDA_OVERRIDE_ENUM(cuMemFreeAsync_ptsz),
+    CUDA_OVERRIDE_ENUM(cuMemAllocFromPoolAsync_ptsz),
     CUDA_ENTRY_END
 }cuda_override_enum_t;
 
@@ -220,4 +240,24 @@ extern cuda_entry_t cuda_library_entry[];
 
 #undef cuGetProcAddress
 CUresult cuGetProcAddress( const char* symbol, void** pfn, int  cudaVersion, cuuint64_t flags );
+
+/* Per-thread-default-stream entry points. cuda.h only declares these under
+ * CUDA_API_PER_THREAD_DEFAULT_STREAM, so declare them here. */
+CUresult cuLaunchKernel_ptsz(CUfunction f, unsigned int gridDimX, unsigned int gridDimY,
+    unsigned int gridDimZ, unsigned int blockDimX, unsigned int blockDimY,
+    unsigned int blockDimZ, unsigned int sharedMemBytes, CUstream hStream,
+    void **kernelParams, void **extra);
+CUresult cuLaunchKernelEx_ptsz(const CUlaunchConfig *config, CUfunction f,
+    void **kernelParams, void **extra);
+CUresult cuLaunchCooperativeKernel_ptsz(CUfunction f, unsigned int gridDimX,
+    unsigned int gridDimY, unsigned int gridDimZ, unsigned int blockDimX,
+    unsigned int blockDimY, unsigned int blockDimZ, unsigned int sharedMemBytes,
+    CUstream hStream, void **kernelParams);
+CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream);
+CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream);
+CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream);
+CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize,
+    CUmemoryPool pool, CUstream hStream);
+
+#define SOFTMIG_PTSZ_STREAM(s) ((s) == NULL ? CU_STREAM_PER_THREAD : (s))
 

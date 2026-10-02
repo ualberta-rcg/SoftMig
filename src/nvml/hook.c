@@ -28,6 +28,7 @@
 // Note: multiprocess_memory_limit.h includes <nvml.h> in its .c file, not the .h file
 // So including the header here should be safe
 #include "multiprocess/multiprocess_memory_limit.h"
+#include "include/softmig_mode.h"
 
 entry_t nvml_library_entry[] = {
     {.name = "nvmlInit"},
@@ -273,11 +274,17 @@ entry_t nvml_library_entry[] = {
     {.name = "nvmlDeviceGetGraphicsRunningProcesses_v2"},
     {.name = "nvmlDeviceGetComputeRunningProcesses_v3"},
     {.name = "nvmlDeviceGetGraphicsRunningProcesses_v3"},
+    {.name = "nvmlDeviceGetMPSComputeRunningProcesses_v2"},
+    {.name = "nvmlDeviceGetMPSComputeRunningProcesses_v3"},
+    {.name = "nvmlDeviceGetRunningProcessDetailList"},
+    {.name = "nvmlDeviceGetProcessesUtilizationInfo"},
     {.name = "nvmlDeviceSetTemperatureThreshold"},
     //{.name = "nvmlRetry_NvRmControl"},
     {.name = "nvmlVgpuInstanceGetGpuInstanceId"},
     {.name = "nvmlVgpuTypeGetGpuInstanceProfileId"},
 };
+_Static_assert(sizeof(nvml_library_entry) / sizeof(nvml_library_entry[0]) == NVML_ENTRY_END,
+               "nvml_library_entry must match NVML_OVERRIDE_ENUM_t");
 
 pthread_once_t init_virtual_map_pre_flag = PTHREAD_ONCE_INIT;
 pthread_once_t init_virtual_map_post_flag = PTHREAD_ONCE_INIT;
@@ -324,16 +331,22 @@ void load_nvml_libraries() {
     dlclose(table);
 }
 
-void nvml_preInit() {
-    ensure_initialized();
-    load_env_from_file(ENV_OVERRIDE_FILE);
-    load_nvml_libraries();
-    for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
-        cuda_to_nvml_map_array[i] = i;
-    }   
+static pthread_once_t nvml_table_once = PTHREAD_ONCE_INIT;
+
+static void softmig_ensure_nvml_table(void) {
+    pthread_once(&nvml_table_once, load_nvml_libraries);
 }
 
-void nvml_postInit() {
+static void softmig_nvml_pre_init(void) {
+    ensure_initialized();
+    load_env_from_file(ENV_OVERRIDE_FILE);
+    softmig_ensure_nvml_table();
+    for (int i = 0; i < CUDA_DEVICE_MAX_COUNT; i++) {
+        cuda_to_nvml_map_array[i] = i;
+    }
+}
+
+static void softmig_nvml_post_init(void) {
     init_device_info();
 }
 
@@ -409,7 +422,7 @@ uint64_t sum_process_memory_from_nvml(nvmlDevice_t device) {
 nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int version) {
     // Reduced logging - nvmlDeviceGetMemoryInfo is called very frequently (e.g., by nvidia-smi)
     if (memory == NULL) {
-        return NVML_SUCCESS;
+        return NVML_ERROR_INVALID_ARGUMENT;
     }
     unsigned int dev_id;
 
@@ -472,10 +485,12 @@ nvmlReturn_t _nvmlDeviceGetMemoryInfo(nvmlDevice_t device,void* memory,int versi
 }
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo(nvmlDevice_t device, nvmlMemory_t* memory) {
-    return _nvmlDeviceGetMemoryInfo(device,memory,1); 
+    SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetMemoryInfo, device, memory);
+    return _nvmlDeviceGetMemoryInfo(device,memory,1);
 }
 
 nvmlReturn_t nvmlDeviceGetMemoryInfo_v2(nvmlDevice_t device, nvmlMemory_v2_t* memory) {
+    SOFTMIG_PASSIVE_FORWARD_NVML(nvmlDeviceGetMemoryInfo_v2, device, memory);
     return _nvmlDeviceGetMemoryInfo(device,memory,2);
 }
 
@@ -535,26 +550,30 @@ nvmlReturn_t nvmlDeviceGetCount_v2 ( unsigned int* deviceCount ) {
 
 nvmlReturn_t nvmlInitWithFlags( unsigned int  flags ) {
     LOG_DEBUG("nvmlInitWithFlags");
-    pthread_once(&init_virtual_map_pre_flag, (void(*) (void))nvml_preInit);
+    if (softmig_is_passive()) {
+        softmig_ensure_nvml_table();
+        return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlInitWithFlags, flags);
+    }
+    pthread_once(&init_virtual_map_pre_flag, softmig_nvml_pre_init);
     nvmlReturn_t res =  NVML_OVERRIDE_CALL(nvml_library_entry, nvmlInitWithFlags,flags);
-    pthread_once(&init_virtual_map_post_flag,(void (*)(void))nvml_postInit);
-    return res;
-}
-
-nvmlReturn_t nvmlInit(void) {
-    LOG_DEBUG("nvmlInit");
-    pthread_once(&init_virtual_map_pre_flag,(void (*)(void))nvml_preInit);
-    nvmlReturn_t res = NVML_OVERRIDE_CALL(nvml_library_entry, nvmlInit_v2);
-    pthread_once(&init_virtual_map_post_flag,(void (*)(void))nvml_postInit);
+    pthread_once(&init_virtual_map_post_flag, softmig_nvml_post_init);
     return res;
 }
 
 nvmlReturn_t nvmlInit_v2(void) {
     LOG_DEBUG("nvmlInit_v2");
-    pthread_once(&init_virtual_map_pre_flag,(void (*)(void))nvml_preInit);
+    if (softmig_is_passive()) {
+        softmig_ensure_nvml_table();
+        return NVML_OVERRIDE_CALL(nvml_library_entry, nvmlInit_v2);
+    }
+    pthread_once(&init_virtual_map_pre_flag, softmig_nvml_pre_init);
     nvmlReturn_t res = NVML_OVERRIDE_CALL(nvml_library_entry, nvmlInit_v2);
-    pthread_once(&init_virtual_map_post_flag,(void (*)(void))nvml_postInit);
+    pthread_once(&init_virtual_map_post_flag, softmig_nvml_post_init);
     return res;
+}
+
+nvmlReturn_t nvmlInit(void) {
+    return nvmlInit_v2();
 }
 
 nvmlReturn_t nvmlDeviceGetPciInfo_v3(nvmlDevice_t device, nvmlPciInfo_t *pci) {

@@ -35,7 +35,8 @@ static inline int softmig_passthrough(CUdevice dev) {
 // passive mode, forward to the real driver call untouched.
 #define SOFTMIG_MEM_GUARD(dev, real_fn, ...)                                  \
     CUdevice dev;                                                             \
-    if (CUDA_OVERRIDE_CALL(cuda_library_entry, cuCtxGetDevice, &dev) != CUDA_SUCCESS || \
+    if (softmig_is_passive() ||                                               \
+        CUDA_OVERRIDE_CALL(cuda_library_entry, cuCtxGetDevice, &dev) != CUDA_SUCCESS || \
         softmig_passthrough(dev)) {                                           \
         return CUDA_OVERRIDE_CALL(cuda_library_entry, real_fn, ##__VA_ARGS__); \
     }
@@ -166,7 +167,7 @@ CUresult cuArrayDestroy(CUarray arr) {
     return res;
 }
 
-CUresult cuMemoryAllocate(CUdeviceptr* dptr, size_t bytesize, void* data) {
+CUresult softmig_mem_allocate(CUdeviceptr* dptr, size_t bytesize, void* data) {
     CUresult res;
     res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAlloc_v2,dptr,bytesize);
     return res;
@@ -475,70 +476,44 @@ CUresult cuMemsetD8Async ( CUdeviceptr dstDevice, unsigned char  uc, size_t N, C
 // signature).
 
 #ifdef HOOK_MEMINFO_ENABLE
-#undef cuMemGetInfo
-FUNC_ATTR_VISIBLE CUresult cuMemGetInfo(size_t* free, size_t* total) {
-    CUdevice dev;
-    LOG_DEBUG("cuMemGetInfo");
-    ENSURE_INITIALIZED();
-    CHECK_DRV_API(cuCtxGetDevice(&dev));
-    
-    unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
-    size_t limit = get_current_device_memory_limit(nvml_dev_idx);
-
-    // Check if real cuMemGetInfo exists, otherwise fall back to cuMemGetInfo_v2
-    void* real_fn = CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo);
-    if (real_fn == NULL) {
-        LOG_DEBUG("cuMemGetInfo not found, falling back to cuMemGetInfo_v2");
-        return cuMemGetInfo_v2(free, total);
+// Report free/total against the per-job limit. Limits and tracked usage are
+// keyed by CUDA device index (same as oom_check / add_chunk). Over-limit
+// usage reports free=0 rather than an error, matching a full real GPU.
+static CUresult softmig_meminfo(CUresult real_res, CUdevice dev, size_t* free, size_t* total) {
+    if (real_res != CUDA_SUCCESS) {
+        return real_res;
     }
-
+    size_t limit = get_current_device_memory_limit(dev);
     if (limit == 0) {
-        // Passive mode: report the real driver values unchanged
-        return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo, free, total);
-    }
-
-    uint64_t usage = get_current_usage_for_meminfo(dev, nvml_dev_idx);
-
-    if (limit < usage) {
-        LOG_WARN("limit < usage; usage=%ld, limit=%ld", usage, limit);
-        return CUDA_ERROR_INVALID_VALUE;
-    } else {
-        CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo, free, total);
-        // Ensure total memory does not exceed the physical or imposed limit.
-        size_t actual_limit = (limit > *total) ? *total : limit;
-        *free = (actual_limit > usage) ? (actual_limit - usage) : 0;
-        *total = actual_limit;
         return CUDA_SUCCESS;
     }
+    uint64_t usage = get_current_usage_for_meminfo(dev, cuda_to_nvml_map(dev));
+    size_t actual_limit = (limit > *total) ? *total : limit;
+    if (usage > actual_limit) {
+        LOG_WARN("cuMemGetInfo: usage %lu exceeds limit %lu, reporting free=0", usage, actual_limit);
+    }
+    *free = (actual_limit > usage) ? (actual_limit - usage) : 0;
+    *total = actual_limit;
+    return CUDA_SUCCESS;
+}
+
+#undef cuMemGetInfo
+FUNC_ATTR_VISIBLE CUresult cuMemGetInfo(size_t* free, size_t* total) {
+    if (CUDA_FIND_ENTRY(cuda_library_entry, cuMemGetInfo) == NULL) {
+        return cuMemGetInfo_v2(free, total);
+    }
+    SOFTMIG_MEM_GUARD(dev, cuMemGetInfo, free, total);
+    LOG_DEBUG("cuMemGetInfo");
+    return softmig_meminfo(CUDA_OVERRIDE_CALL(cuda_library_entry, cuMemGetInfo, free, total),
+                           dev, free, total);
 }
 
 #undef cuMemGetInfo_v2
 FUNC_ATTR_VISIBLE CUresult cuMemGetInfo_v2(size_t* free, size_t* total) {
-    CUdevice dev;
+    SOFTMIG_MEM_GUARD(dev, cuMemGetInfo_v2, free, total);
     LOG_DEBUG("cuMemGetInfo_v2");
-    ENSURE_INITIALIZED();
-    CHECK_DRV_API(cuCtxGetDevice(&dev));
-    
-    unsigned int nvml_dev_idx = cuda_to_nvml_map(dev);
-    size_t limit = get_current_device_memory_limit(nvml_dev_idx);
-
-    if (limit == 0) {
-        // Passive mode: report the real driver values unchanged
-        return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo_v2, free, total);
-    }
-
-    uint64_t usage = get_current_usage_for_meminfo(dev, nvml_dev_idx);
-    if (limit < usage) {
-        LOG_WARN("limit < usage; usage=%ld, limit=%ld", usage, limit);
-        return CUDA_ERROR_INVALID_VALUE;
-    } else {
-        CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemGetInfo_v2, free, total);
-        // Ensure total memory does not exceed the physical or imposed limit.
-        size_t actual_limit = (limit > *total) ? *total : limit;
-        *free = (actual_limit > usage) ? (actual_limit - usage) : 0;
-        *total = actual_limit;
-        return CUDA_SUCCESS;
-    }
+    return softmig_meminfo(CUDA_OVERRIDE_CALL(cuda_library_entry, cuMemGetInfo_v2, free, total),
+                           dev, free, total);
 }
 #endif
 
@@ -564,26 +539,54 @@ CUresult cuMipmappedArrayDestroy(CUmipmappedArray hMipmappedArray) {
     return res;
 }
 
-CUresult cuLaunchKernel ( CUfunction f, unsigned int  gridDimX, unsigned int  gridDimY, unsigned int  gridDimZ, unsigned int  blockDimX, unsigned int  blockDimY, unsigned int  blockDimZ, unsigned int  sharedMemBytes, CUstream hStream, void** kernelParams, void** extra ){
+static inline void softmig_before_launch(unsigned int gx, unsigned int gy, unsigned int gz,
+                                         unsigned int bx, unsigned int by, unsigned int bz) {
     ENSURE_RUNNING();
     pre_launch_kernel();
-    if (pidfound==1){ 
-        rate_limiter(gridDimX * gridDimY * gridDimZ,
-                   blockDimX * blockDimY * blockDimZ);
+    if (pidfound==1){
+        rate_limiter(gx * gy * gz, bx * by * bz);
     }
-    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuLaunchKernel,f,gridDimX,gridDimY,gridDimZ,blockDimX,blockDimY,blockDimZ,sharedMemBytes,hStream,kernelParams,extra);
-    return res;
 }
 
+CUresult cuLaunchKernel ( CUfunction f, unsigned int  gridDimX, unsigned int  gridDimY, unsigned int  gridDimZ, unsigned int  blockDimX, unsigned int  blockDimY, unsigned int  blockDimZ, unsigned int  sharedMemBytes, CUstream hStream, void** kernelParams, void** extra ){
+    SOFTMIG_PASSIVE_FORWARD(cuLaunchKernel,f,gridDimX,gridDimY,gridDimZ,blockDimX,blockDimY,blockDimZ,sharedMemBytes,hStream,kernelParams,extra);
+    softmig_before_launch(gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ);
+    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuLaunchKernel,f,gridDimX,gridDimY,gridDimZ,blockDimX,blockDimY,blockDimZ,sharedMemBytes,hStream,kernelParams,extra);
+}
+
+CUresult cuLaunchKernel_ptsz ( CUfunction f, unsigned int  gridDimX, unsigned int  gridDimY, unsigned int  gridDimZ, unsigned int  blockDimX, unsigned int  blockDimY, unsigned int  blockDimZ, unsigned int  sharedMemBytes, CUstream hStream, void** kernelParams, void** extra ){
+    return cuLaunchKernel(f,gridDimX,gridDimY,gridDimZ,blockDimX,blockDimY,blockDimZ,sharedMemBytes,SOFTMIG_PTSZ_STREAM(hStream),kernelParams,extra);
+}
 
 CUresult cuLaunchCooperativeKernel ( CUfunction f, unsigned int  gridDimX, unsigned int  gridDimY, unsigned int  gridDimZ, unsigned int  blockDimX, unsigned int  blockDimY, unsigned int  blockDimZ, unsigned int  sharedMemBytes, CUstream hStream, void** kernelParams ){
-    ENSURE_RUNNING();
-    pre_launch_kernel();
-    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuLaunchCooperativeKernel,f,gridDimX,gridDimY,gridDimZ,blockDimX,blockDimY,blockDimZ,sharedMemBytes,hStream,kernelParams);
-    return res;
+    SOFTMIG_PASSIVE_FORWARD(cuLaunchCooperativeKernel,f,gridDimX,gridDimY,gridDimZ,blockDimX,blockDimY,blockDimZ,sharedMemBytes,hStream,kernelParams);
+    softmig_before_launch(gridDimX, gridDimY, gridDimZ, blockDimX, blockDimY, blockDimZ);
+    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuLaunchCooperativeKernel,f,gridDimX,gridDimY,gridDimZ,blockDimX,blockDimY,blockDimZ,sharedMemBytes,hStream,kernelParams);
 }
 
-CUresult cuMemoryFree(CUdeviceptr dptr) {
+CUresult cuLaunchCooperativeKernel_ptsz ( CUfunction f, unsigned int  gridDimX, unsigned int  gridDimY, unsigned int  gridDimZ, unsigned int  blockDimX, unsigned int  blockDimY, unsigned int  blockDimZ, unsigned int  sharedMemBytes, CUstream hStream, void** kernelParams ){
+    return cuLaunchCooperativeKernel(f,gridDimX,gridDimY,gridDimZ,blockDimX,blockDimY,blockDimZ,sharedMemBytes,SOFTMIG_PTSZ_STREAM(hStream),kernelParams);
+}
+
+CUresult cuLaunchKernelEx(const CUlaunchConfig *config, CUfunction f, void **kernelParams, void **extra) {
+    SOFTMIG_PASSIVE_FORWARD(cuLaunchKernelEx, config, f, kernelParams, extra);
+    if (config != NULL) {
+        softmig_before_launch(config->gridDimX, config->gridDimY, config->gridDimZ,
+                              config->blockDimX, config->blockDimY, config->blockDimZ);
+    }
+    return CUDA_OVERRIDE_CALL(cuda_library_entry, cuLaunchKernelEx, config, f, kernelParams, extra);
+}
+
+CUresult cuLaunchKernelEx_ptsz(const CUlaunchConfig *config, CUfunction f, void **kernelParams, void **extra) {
+    if (config == NULL || config->hStream != NULL) {
+        return cuLaunchKernelEx(config, f, kernelParams, extra);
+    }
+    CUlaunchConfig c = *config;
+    c.hStream = CU_STREAM_PER_THREAD;
+    return cuLaunchKernelEx(&c, f, kernelParams, extra);
+}
+
+CUresult softmig_mem_free(CUdeviceptr dptr) {
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFree_v2,dptr);
     return res;
 }
@@ -647,6 +650,14 @@ CUresult cuMemFreeAsync(CUdeviceptr dptr, CUstream hStream) {
     return res;
 }
 
+CUresult cuMemAllocAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUstream hStream) {
+    return cuMemAllocAsync(dptr, bytesize, SOFTMIG_PTSZ_STREAM(hStream));
+}
+
+CUresult cuMemFreeAsync_ptsz(CUdeviceptr dptr, CUstream hStream) {
+    return cuMemFreeAsync(dptr, SOFTMIG_PTSZ_STREAM(hStream));
+}
+
 CUresult cuMemHostGetDevicePointer_v2(CUdeviceptr *pdptr, void *p, unsigned int Flags){
     return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemHostGetDevicePointer_v2,pdptr,p,Flags);
 }
@@ -695,6 +706,10 @@ CUresult cuMemAllocFromPoolAsync(CUdeviceptr *dptr, size_t bytesize, CUmemoryPoo
         add_chunk_async_only(*dptr, bytesize);
     }
     return res;
+}
+
+CUresult cuMemAllocFromPoolAsync_ptsz(CUdeviceptr *dptr, size_t bytesize, CUmemoryPool pool, CUstream hStream) {
+    return cuMemAllocFromPoolAsync(dptr, bytesize, pool, SOFTMIG_PTSZ_STREAM(hStream));
 }
 
 CUresult cuMemPoolExportToShareableHandle(void *handle_out, CUmemoryPool pool, CUmemAllocationHandleType handleType, unsigned long long flags) {

@@ -11,8 +11,16 @@
 #include "include/libcuda_hook.h"
 
 extern void rate_limiter(int grids, int blocks);
+extern int pidfound;
 
 CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream) {
-	rate_limiter(0, 0);
+	SOFTMIG_PASSIVE_FORWARD(cuGraphLaunch, hGraphExec, hStream);
+	if (pidfound == 1) {
+		rate_limiter(0, 0);
+	}
 	return CUDA_OVERRIDE_CALL(cuda_library_entry,cuGraphLaunch,hGraphExec,hStream);
+}
+
+CUresult cuGraphLaunch_ptsz(CUgraphExec hGraphExec, CUstream hStream) {
+	return cuGraphLaunch(hGraphExec, SOFTMIG_PTSZ_STREAM(hStream));
 }

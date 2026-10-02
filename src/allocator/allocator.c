@@ -31,8 +31,8 @@ allocated_list *device_allocasync;
 
 extern size_t initial_offset;
 extern CUresult
-    cuMemoryAllocate(CUdeviceptr* dptr, size_t bytesize, void* data);
-extern CUresult cuMemoryFree(CUdeviceptr dptr);
+    softmig_mem_allocate(CUdeviceptr* dptr, size_t bytesize, void* data);
+extern CUresult softmig_mem_free(CUdeviceptr dptr);
 
 pthread_once_t allocator_allocate_flag = PTHREAD_ONCE_INIT;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
@@ -159,7 +159,7 @@ int add_chunk(CUdeviceptr *address, size_t size) {
         res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemAlloc_v2,&e->entry->address,size);
     else{
         e->entry->length = size;
-        res = cuMemoryAllocate(&e->entry->address, size, e->entry->allocHandle);
+        res = softmig_mem_allocate(&e->entry->address, size, e->entry->allocHandle);
     }
     if (res!=CUDA_SUCCESS){
         LOG_ERROR("cuMemoryAllocate failed res=%d",res);
@@ -216,26 +216,52 @@ int check_memory_type(CUdeviceptr address) {
     return CU_MEMORYTYPE_HOST;
 }
 
-int remove_chunk(allocated_list *a_list, CUdeviceptr dptr) {
-    size_t t_size;
-    if (a_list->length==0) {
-        LOG_DEBUG("remove_chunk: list empty, forwarding free of untracked %llx to real cuMemFree_v2",dptr);
-        return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFree_v2,dptr);
-    }
+static allocated_list_entry *find_chunk(allocated_list *a_list, CUdeviceptr dptr) {
     allocated_list_entry *val;
-    for (val=a_list->head;val!=NULL;val=val->next){
+    for (val = a_list->head; val != NULL; val = val->next) {
         if (val->entry->address == dptr) {
-            t_size=val->entry->length;
-            CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFree_v2,dptr);
-            LIST_REMOVE(a_list,val);
-            CUdevice dev;
-            cuCtxGetDevice(&dev);
-            rm_gpu_device_memory_usage(getpid(), dev, t_size, 2);
-            return res;
+            return val;
         }
     }
-    LOG_DEBUG("remove_chunk: %llx not tracked, forwarding to real cuMemFree_v2",dptr);
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFree_v2,dptr);
+    return NULL;
+}
+
+// Drop bookkeeping for a chunk the driver has already freed.
+static void untrack_chunk(allocated_list *a_list, allocated_list_entry *val) {
+    size_t t_size = val->entry->length;
+    LIST_REMOVE(a_list, val);
+    if (a_list == device_allocasync) {
+        a_list->limit -= t_size;
+    }
+    CUdevice dev;
+    cuCtxGetDevice(&dev);
+    rm_gpu_device_memory_usage(getpid(), dev, t_size, 2);
+}
+
+// CUDA lets cuMemFree release a cuMemAllocAsync pointer and vice versa, so a
+// pointer missing from the expected list is looked up in the other one.
+static allocated_list_entry *find_chunk_any(allocated_list *first, CUdeviceptr dptr,
+                                            allocated_list **owner) {
+    allocated_list *other = (first == device_allocasync) ? device_overallocated : device_allocasync;
+    allocated_list_entry *val = find_chunk(first, dptr);
+    *owner = first;
+    if (val == NULL) {
+        val = find_chunk(other, dptr);
+        *owner = other;
+    }
+    return val;
+}
+
+int remove_chunk(allocated_list *a_list, CUdeviceptr dptr) {
+    allocated_list *owner;
+    allocated_list_entry *val = find_chunk_any(a_list, dptr, &owner);
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFree_v2,dptr);
+    if (val == NULL) {
+        LOG_DEBUG("remove_chunk: %llx not tracked, forwarded to real cuMemFree_v2",dptr);
+    } else if (res == CUDA_SUCCESS) {
+        untrack_chunk(owner, val);
+    }
+    return res;
 }
 
 int remove_chunk_only(CUdeviceptr dptr) {
@@ -280,26 +306,15 @@ int free_raw(CUdeviceptr dptr) {
 
 int remove_chunk_async(
     allocated_list *a_list, CUdeviceptr dptr, CUstream hStream) {
-    size_t t_size;
-    if (a_list->length == 0) {
-        LOG_DEBUG("remove_chunk_async: list empty, forwarding free of untracked %llx to real cuMemFreeAsync",dptr);
-        return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFreeAsync,dptr,hStream);
+    allocated_list *owner;
+    allocated_list_entry *val = find_chunk_any(a_list, dptr, &owner);
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFreeAsync,dptr,hStream);
+    if (val == NULL) {
+        LOG_DEBUG("remove_chunk_async: %llx not tracked, forwarded to real cuMemFreeAsync",dptr);
+    } else if (res == CUDA_SUCCESS) {
+        untrack_chunk(owner, val);
     }
-    allocated_list_entry *val;
-    for (val = a_list->head; val != NULL; val = val->next) {
-        if (val->entry->address == dptr) {
-            t_size=val->entry->length;
-            CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFreeAsync,dptr,hStream);
-            LIST_REMOVE(a_list,val);
-            a_list->limit-=t_size;
-            CUdevice dev;
-            cuCtxGetDevice(&dev);
-            rm_gpu_device_memory_usage(getpid(),dev,t_size,2);
-            return 0;
-        }
-    }
-    LOG_DEBUG("remove_chunk_async: %llx not tracked, forwarding to real cuMemFreeAsync",dptr);
-    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuMemFreeAsync,dptr,hStream);
+    return res;
 }
 
 int free_raw_async(CUdeviceptr dptr, CUstream hStream) {
