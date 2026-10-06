@@ -5,6 +5,309 @@ For deployment and usage instructions, see `README.md`.
 
 ---
 
+## 2026-10-02 — branch `2.07`
+
+Branched from `2.06` (`217d322`). That branch is unchanged.
+
+This is the pressure-campaign follow-up: SM enforcement for workloads that never go through `cuLaunchKernel`, plus the suites that measure sets of jobs against what root sees on the node. It is **not** the library installed on rack01-11. The node is still `40fba696` (built from this worktree at 23:30 MDT on Oct 1). That build has the array/graph tracking and the duty-cycle throttle below. It does not have the memset and device-copy charge. That charge is in this branch and has not been deployed or re-run.
+
+### What the Oct 1–2 campaign measured (lib `40fba696`)
+
+Suites judge each job against root `nvidia-smi pmon`, `--query-compute-apps`, and `/proc/<pid>/cgroup`.
+
+- **Array, mipmapped-array and graph allocation nodes were only checked, not tracked.** A tight `cuArrayCreate` loop ran 1.5x past the limit. They now use the same reserve, driver call, commit path as `cuMemCreate`, and the destroy calls release the chunk. `cuGraphAddMemAllocNode` tracks `nodeParams->dptr`; `cuGraphAddMemFreeNode` releases it. On `40fba696`, every allocation API was `CAPPED` on a quarter and `PASSTHROUGH` on a whole GPU (21/21).
+- **Long cuBLAS kernels escaped the SM limit.** The token bucket charges per launch, so real `gpu_burn` ran at 88% of the card on a 25% slice. The utilization watcher now adds a duty-cycle throttle: measured SM more than 3 points over the limit for 8 cycles (~1 s) delays every later launch (2 ms start, x1.1/x1.2 growth, 250 ms cap, x0.93 decay). On `40fba696`, `gpu_burn` on a quarter measured about 25% (lite burner about 23%). `SOFTMIG_SM_DUTY_THROTTLE=0` disables it.
+- **Four quarter burn jobs on one GPU each stayed inside the quarter** (S3): 23.3, 21.5, 21.6, 21.3% SM, 6426/11517 MiB each. A whole GPU next to a quarter stayed a whole GPU (~98% SM, view 46068 MiB) while the quarter stayed capped.
+- **`stress_alloc` on a quarter used 71% SM** (G6, mean; the four processes in that one job were 22, 19, 25 and 33%). Memory stayed at 3704/11517 MiB. Only two of the four quarters on that GPU had a job: this one and a lite burner at 27%. The 71% filled the two empty quarters. It did not push the burner below its cap. `cuMemset` and device-to-device copies run as driver kernels and never entered `rate_limiter` in `40fba696`. 2.05 has the same hole: those wrappers do not call `rate_limiter` there either.
+- **`nvidia-smi` 595.91.07 shows other jobs' processes.** It reads them through `nvmlInternalGetExportTable`, which bypasses the NVML symbols SoftMig hooks. Suites report that as `LEAK`. `nvidia-smi-hook.sh` filters `pmon` and the default table as well as `--query-compute-apps`. With the wrapper on `PATH`, W1 passed.
+
+### Not yet measured (this branch only)
+
+`cuMemsetD*`, `cuMemsetD2D*`, `cuMemcpyDtoD*` and `cuMemcpyPeer*` now call the rate limiter (1 token per MiB) and take the duty delay, the same as a launch. This is the response to G6. No job has loaded this build.
+
+### Tests
+
+Pressure-campaign suites, new on this branch: `test/share_lib.sh`, `test/share_report.py`, `test/node_sampler.sh`, `test/suite_share.sh` (S1–S7, G1–G6, W1), `test/suite_passthrough.sh` (P1–P4), `test/suite_mixed_pieces.sh` (M1–M6), `test/suite_gpuburn.sh` (B1–B5), `test/suite_isolation.sh`, `test/suite_bypass.sh`, `test/suite_storm.sh`. Drivers: `test/run_sets.sh`, `test/run_overnight.sh`, `test/overnight_driver.sh`, `test/sets_summary.py`. The root sampler is started with `sudo ssh` and shared for a campaign (`SAMPLER_SHARED`).
+
+---
+
+## 2026-10-01 — branch `2.06`
+
+### Shared-region lock: robust mutex, nobody gets robbed
+
+The region lock was a `sem_t` plus an `owner_pid` used to guess when a
+holder was gone; after 18 s a waiter "recovered" the lock by force even from
+a live holder and re-initialized the semaphore under other waiters. The new
+`fault` suite reproduced it on 2.05: SIGSTOPped workers had the lock stolen
+4 times and the semaphore was left in a held state with no owner.
+
+The lock is now a robust, process-shared, error-checking `pthread_mutex_t`
+(region layout 2.0). A live holder is waited for (WARN every 15 s); if a
+holder dies the kernel hands the next locker `EOWNERDEAD`, which clears dead
+slots and marks the mutex consistent. Re-entrant per thread. `fix_lock_shrreg`
+and the forced recovery are gone. The layout version is part of the region
+file name (`cudevshr.cache.v2.<jobid>`), so a job spanning a library redeploy
+never mixes layouts in one file. The exit handler waits up to 10 s (was 3 s).
+
+### Allocations no longer run under the lock
+
+The limit check, the real `cuMemAlloc` and the bookkeeping all ran under
+the region lock, serializing every allocation in a job. Now:
+`softmig_reserve()` checks the limit and records the bytes as *pending* in
+the process's slot (under the lock), the driver allocation runs with no lock
+held, and the chunk is committed (or the reservation released). The limit
+check counts `max(tracked, NVML) + pending`, so concurrent admissions stay
+exact; a process that dies mid-allocation takes its pending bytes with its
+slot. The NVML usage read happens before taking the lock, and allocation
+commits no longer invalidate the NVML cache (only frees do).
+`cuMemAllocManaged`, `cuMemAllocPitch_v2`, `cuMemCreate` and
+`cuMemAllocFromPoolAsync` use the same reserve/commit pair; previously they
+re-ran the limit check after a successful driver allocation and could
+return OOM with the memory live and untracked.
+
+Stress suite (64 processes x 4 threads on a half slice): 199k alloc/free
+cycles vs 44k on 2.05 in the same time, no lock timeouts (2.05: 3 exits
+could not take the lock); under 1 GiB requests from 16 processes the real
+peak stayed at 18.4 of 23.0 GiB with OOMs returned.
+
+### Other fixes
+
+- Tracked usage is stored at the NVML device index but the OOM check, the
+  OOM killers and `get_current_device_memory_usage` read it with CUDA
+  indices; they now map first (matters when CUDA and NVML numbering differ).
+- Region full (1024 processes): the extra process runs untracked with an
+  ERROR instead of being killed by `exit(-1)`.
+- `remove_chunk_only` (cuMemRelease) now takes the allocator mutex.
+- If `/var/log/softmig` is not writable the log falls back to
+  `$SLURM_TMPDIR`, which is wiped at job end; ERROR lines are then also
+  written to stderr (the job's output file), with a note naming the file.
+- `cuGraphAddMemAllocNode` is hooked as a limit check (graph memory nodes
+  were an unacknowledged bypass). Nodes created implicitly by stream capture
+  are still not seen.
+
+### Tests
+
+- Hang capture: suites arm an in-job watchdog; a hang becomes `HANG` with
+  per-thread `/proc` state, and with `SOFTMIG_HANG_GDB_SUDO=1` the runner
+  takes root gdb stacks on the reservation node (ptrace_scope=1 blocks it
+  inside the job). The stuck processes are then killed so logs are kept.
+- New one-off suites (CUDA 12.6): `stress` (16/32/64 procs + enforcement
+  round), `fault` (SIGKILL/SIGSTOP injection), `frameworks` (PyTorch native
+  and cudaMallocAsync, TensorFlow, DataLoader fork + spawn; slice and full
+  GPU), `fork`, `multigpu`, `array`, `security` (env vars ignored, symlinked
+  and user-owned configs rejected; root side needs `SOFTMIG_TEST_SUDO=1`),
+  `container` and `overhead` (informational). New probes: `stress_alloc`,
+  `shrreg_check`, `fork_probe`, `multigpu_probe`, `bench_overhead`,
+  `test/python/fw_limit.py`.
+
+### Findings (documented, not changed)
+
+- Apptainer: the library is not loaded inside containers (their own
+  `/etc/ld.so.preload`), so slices are not enforced there. Preloading it
+  into the container does not help: the user namespace shows the root-owned
+  config as uid 65534, so it is rejected and the library stays passive,
+  which is the safe outcome. Enforcement in containers needs site policy.
+- Slurm: a mixed request `--gres=gpu:l40s.2:1,gpu:l40s.4:1` is accepted,
+  allocates one shard (`AllocTRES gres/shard=1`) but the prolog writes a
+  half-GPU limit, so the job gets twice the memory it was allocated.
+  Identical-size multi-slice requests are rejected by job_submit.
+- Overhead (`bench_overhead`): passive adds ~3 ns per launch; a slice adds
+  ~0.2 us per launch and ~44 us per alloc+free.
+
+---
+
+## 2026-10-01 — branch `2.05`
+
+### Off means off: one passive decision, enforced at the choke points
+
+The library is preloaded into every process via `/etc/ld.so.preload`, so it
+has to decide by itself whether to do anything. 2.05 makes that decision once
+per process (`softmig_mode_init()`, `pthread_once`) and, when passive, gets
+out of the way structurally instead of per hook:
+
+- **Rule.** In a Slurm job: active only if `/var/run/softmig/<jobid>[_<array>].conf`
+  is a root-owned regular file that sets `CUDA_DEVICE_MEMORY_LIMIT` or
+  `CUDA_DEVICE_SM_LIMIT` (environment variables are ignored). Outside Slurm:
+  active only if those environment variables are set. The config is opened
+  with `O_NOFOLLOW` and checked with `fstat` (no symlink/TOCTOU games).
+- **`dlsym`** returns the driver's own symbol for every `cu*`/`nvml*` lookup.
+- **`cuGetProcAddress` / `_v2`** forward to the driver untouched.
+- **`nvmlInit*`** forward without creating the shared region or watcher.
+- **Direct-linked callers** hit exported wrappers, each of which starts with
+  `SOFTMIG_PASSIVE_FORWARD` (or `SOFTMIG_MEM_GUARD`). A build-time lint,
+  `src/check_passive_guards.sh`, fails the build if any exported wrapper that
+  reaches SoftMig internals lacks the guard, so a new hook cannot silently
+  reintroduce the Bowling `cudaFreeAsync ... UNKNOWN ERROR (-1)` class of bug.
+- Passive processes create no `/tmp/cudevshr.cache.*`, start no watcher
+  thread, and install no `SIGUSR1`/`SIGUSR2` handlers. Passive mode is full
+  pass-through, including NVML (full-GPU jobs are exclusive, so there is
+  nothing to filter).
+
+### `cuGetProcAddress` substitutes by pointer identity
+
+Enabled mode used to guess `_v2`/`_v3` names from `cudaVersion` and hand out
+our hook for the guess, which could return a hook with the wrong ABI. Now the
+real `cuGetProcAddress` runs first and our hook is substituted only if the
+returned pointer is exactly a driver function we hook (resolved by exact
+name). Per-thread-default-stream lookups (`flags=2`, `*_ptsz`) are covered by
+new `_ptsz` wrappers that map stream 0 to `CU_STREAM_PER_THREAD`.
+
+### New hooks (driver 595 / CUDA 13 audit)
+
+- `cuLaunchKernelEx` (CUDA 12+ launch path used by cudart and Triton) and
+  `_ptsz` variants of `cuLaunchKernel`, `cuLaunchKernelEx`,
+  `cuLaunchCooperativeKernel`, `cuGraphLaunch`, `cuMemAllocAsync`,
+  `cuMemFreeAsync`, `cuMemAllocFromPoolAsync`. `cuLaunchCooperativeKernel` is
+  now SM-rate-limited like `cuLaunchKernel`.
+- `cuMemFreeAsync` was missing from the `dlsym` hook list, so frees through
+  cudart were never untracked in enabled mode (tracked usage only grew).
+- NVML: `nvmlDeviceGetRunningProcessDetailList`,
+  `nvmlDeviceGetProcessesUtilizationInfo` and
+  `nvmlDeviceGetMPSComputeRunningProcesses_v2`/`_v3` are filtered to the job's
+  processes like the other process lists.
+- Any watched entry point (memory, launch, meminfo, NVML process queries) that
+  still resolves to the raw driver is logged once as `UNHOOKED` in the job log.
+  `test/audit_hooks.sh` does the same check statically against the installed
+  driver (driver 595.91.07: 0 unhooked).
+
+### Shared-region lock: no more self-steal and spin
+
+`owner_pid` is per process, so a thread waiting on the region lock while a
+sibling thread (e.g. the utilization watcher) held it saw `owner == self`,
+declared the lock stale and took it, letting two threads rewrite the process
+table at once. That could leave a slot with `pid == 0`, and
+`clear_proc_slot_nolock` then looped forever on it with the lock held; every
+other process on the GPU stalled behind it (seen as the `direct` suite hang:
+`nvidia-smi` spinning in `nvmlInitWithFlags`). Threads of one process now
+serialize on a local mutex before the cross-process semaphore (re-entrant per
+thread, reset in the fork child), and empty slots are dropped like dead
+processes.
+
+### Other fixes
+
+- `cuDeviceTotalMem_v2` reports the real total, capped at the limit (it
+  returned the limit, i.e. 0, in passive mode).
+- `cuMemGetInfo*` keys limit and usage by the CUDA device index and reports
+  `free = 0` when over the limit instead of `CUDA_ERROR_INVALID_VALUE`.
+- `cuMemFree` of an async/pool pointer (and vice versa) now untracks it from
+  the list it was actually in; tracked usage no longer leaks upward.
+  `remove_chunk*` untrack only after a successful driver free.
+- Utilization watcher: started only when `0 < CUDA_DEVICE_SM_LIMIT < 100`; a
+  failed `nvmlDeviceGetHandleByIndex` no longer returns with the region lock
+  held.
+- `SIGUSR1`/`SIGUSR2` handlers are installed only with the opt-in OOM killer.
+- "Illegal device id" paths return 0 instead of reading past the arrays.
+- NVML process-list hooks follow NVML's sizing contract on the filtered list;
+  `nvmlDeviceGetProcessUtilization` is filtered in place.
+- Removed the `CUDA_REDIRECT` / `vgpulib` dlopen path and
+  `multi_func_hook.h`; the version script exports only `cu*`/`nvml*` hooks.
+- Branch names with dots (e.g. `2.05`) no longer break the build.
+
+### Tests
+
+- `test/passive_probe.c` + `test/suite_passive.sh`: in a full-GPU job every
+  `dlsym`/`cuGetProcAddress` result must equal the driver's, async alloc/free
+  through the per-thread stream must work, no signal handlers or shared region
+  may appear; in a slice job the same probe must see hooks and a region.
+- `suite_smoke` / `suite_direct` gained passive-mode criteria; both fail on any
+  `UNHOOKED` line. `passive` is in the per-version and full-GPU matrix.
+- `test/audit_hooks.sh`: static driver-vs-hooks audit.
+
+---
+
+## 2026-09-09
+
+### Passive mode is now true pass-through for all memory hooks
+
+Full-GPU jobs (no `gres/shard` -> no config file) previously still ran
+SoftMig's interposition logic on every hooked memory call: allocations were
+tracked in the `device_overallocated` / `device_allocasync` lists, untracked
+frees returned `-1`, `cuMemAllocAsync` issued extra pool-attribute queries,
+and `cuMemGetInfo` reported `free = total - cgroup_usage` instead of the
+driver's value. This broke JAX/XLA jobs using
+`XLA_PYTHON_CLIENT_ALLOCATOR=cuda_async` (array jobs `828986_*`, 42/42 tasks
+failed with `cudaFreeAsync failed ... UNKNOWN ERROR (-1)`, leaking
+512 MiB at a time until the card was exhausted).
+
+Every memory hook now checks `softmig_passthrough()` (limit == 0) first and
+forwards straight to the real driver call with no tracking, OOM checks, or
+usage accounting: `cuMemAlloc_v2`, `cuMemFree_v2`, `cuMemAllocAsync`,
+`cuMemFreeAsync`, `cuMemAllocFromPoolAsync`, `cuMemAllocManaged`,
+`cuMemAllocPitch_v2`, `cuMemCreate`, `cuMemRelease`, `cuMemAllocHost_v2`,
+`cuMemHostAlloc`, `cuMemHostRegister_v2`, `cuArrayCreate_v2`,
+`cuArray3DCreate_v2`, `cuMipmappedArrayCreate`, and `cuMemGetInfo` /
+`cuMemGetInfo_v2` (which now return the real driver values for passive jobs).
+`cuLaunchKernel` throttling and NVML process-list filtering are unchanged —
+cgroup isolation is desired for all jobs.
+
+### Untracked frees now fall back to the real driver free
+
+`remove_chunk` and `remove_chunk_async` returned `-1` for any pointer not in
+the tracked list without calling the real driver free. This is what broke
+pool allocations in enabled mode too (a pool pointer freed with `cuMemFree`,
+or any allocation SoftMig failed to track, leaked forever). Both now forward
+untracked frees to the real `cuMemFree_v2` / `cuMemFreeAsync` and return the
+driver's result, so behavior is native-faithful: double-frees and bad
+pointers return real driver errors instead of `-1`. `remove_chunk` also
+propagates the real free's result on the tracked path instead of always
+returning 0. Fallback paths log at DEBUG level.
+
+### Proper OOM error code; post-alloc attribute failures no longer abandon allocations
+
+- `add_chunk_async` and `add_chunk_only` now return `CUDA_ERROR_OUT_OF_MEMORY`
+  instead of `-1` when the limit check fails (XLA/JAX retry logic depends on
+  the proper code).
+- In `add_chunk_async`, if `cuDeviceGetMemPool` or `cuMemPoolGetAttribute`
+  fail after a successful real allocation, the failure is now non-fatal: the
+  allocation is still tracked with the requested size instead of being left
+  live and untracked. A `RESERVED_MEM_HIGH` of 0 is handled the same way, and
+  the `device_allocasync->limit` counter is kept balanced with the tracked
+  entry lengths on all paths.
+
+### Pool allocations are now limit-enforced in enabled mode
+
+`cuMemAllocFromPoolAsync` was a pure pass-through that never tracked its
+allocations, so `gres/shard` jobs using the `cuda_async` allocator got no
+memory enforcement at all. It now runs `oom_check(dev, bytesize)` (returns
+`CUDA_ERROR_OUT_OF_MEMORY` when over the limit), calls the real function, and
+records successful allocations in `device_allocasync` via the new
+`add_chunk_async_only()` helper (requested-size tracking, mirroring
+`add_chunk_only`; no `RESERVED_MEM_HIGH` slab-delta accounting —
+`oom_check_nolock` already takes `max(tracked, NVML)`).
+
+### Test harness
+
+- New regression binary `test/test_pool_free.c` (exit 0 = PASS, 2 = bug
+  reproduced, 1 = setup error) covering the tracked async path, the XLA
+  75%-pool-prealloc pattern, a 20x alloc/free loop, sync free of a pool
+  pointer, passive `cuMemGetInfo` vs `nvidia-smi`, and over-limit pool
+  allocation returning `CUDA_ERROR_OUT_OF_MEMORY`.
+- New suites: `test/suite_pool.sh` (+ `suite_pool_inner.sh`) and
+  `test/jax_cuda_async.sh` (JAX end-to-end under `cuda_async`).
+- `test/run_matrix.sh` runs the new `pool` suite and adds the full-GPU
+  passive slice (`l40s`) for the `smoke`, `direct`, and `pool` suites.
+- Removed the `SOFTMIG_ROOT=/scratch/rahimk/SoftMig` hardcode from
+  `suite_common.sh`, `run_matrix.sh`, `run_oom_validation.sh`, and
+  `sbatch_oomval.sbatch` (derived from each script's own location now);
+  the lib hash lines in `run_multiproc.sh` / `run_oom_validation.sh` read
+  the installed library path from `/etc/ld.so.preload` instead of assuming
+  `/usr/local/lib`; fixed stale rack01-12 comments (reservation node is
+  rack01-11); `suite_smoke.sh` is passive-mode aware.
+- `suite_sm.sh` skips nvidia-smi samples from the first 12s (100% warmup
+  spike before the watcher settles) so the l40s.2 50% target is not
+  failed by startup.
+- `suite_crossjob.sh` occupies 3/4 L40S with a full-GPU blocker so the
+  two 1/4 shard jobs share the remaining card (SLURM otherwise spreads
+  shard jobs across GPUs; `CUDA_VISIBLE_DEVICES=0` is per-job remapped
+  and cannot pin them). PASS requires the same UUID and no cross-PID
+  leak in hooked nvidia-smi / `Found current process`.
+- Hook `nvmlDeviceGetComputeRunningProcesses_v3` and
+  `nvmlDeviceGetGraphicsRunningProcesses_v3`. Driver 595 `nvidia-smi`
+  dlsyms `_v3`, so the `_v2` filter never ran and two jobs on one GPU
+  could see each other's PIDs.
+
+---
+
 ## 2026-05-18
 
 ### Fix cuMemGetInfo to use real-time memory tracking

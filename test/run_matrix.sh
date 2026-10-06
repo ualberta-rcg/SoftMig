@@ -6,14 +6,15 @@
 #
 # Matrix:
 #   CUDA versions : 12.2 12.6 12.9 13.2  (11.8 unavailable under StdEnv/2023)
-#   Slices        : l40s.2 l40s.4
-#   Suites / ver  : smoke direct sm oom crossjob
+#   Slices        : l40s.2 l40s.4  (+ l40s full GPU = passive mode for
+#                   smoke/direct/pool; SM/OOM/crossjob need a limit)
+#   Suites / ver  : smoke direct sm oom crossjob pool
 #   One-offs      : mixed (12.2+13.2), soak (.4 + 12.2), nvsmi (.4 + 12.2)
 #
 # Fail-open: a failing suite just logs its result and the matrix continues.
 
 set -u
-SOFTMIG_ROOT=/scratch/rahimk/SoftMig
+SOFTMIG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SOFTMIG_ROOT"
 
 # Optional extra srun flags (e.g. export SRUN_EXTRA='--partition=gpubase_bygpu_b1'
@@ -21,7 +22,7 @@ cd "$SOFTMIG_ROOT"
 export SRUN_EXTRA="${SRUN_EXTRA:-}"
 
 # Preflight: ensure a GPU step can start soon (reservation node is up).
-# Set SOFTMIG_PREFLIGHT_SECS=0 to skip (jobs will queue until rack01-12 is up).
+# Set SOFTMIG_PREFLIGHT_SECS=0 to skip (jobs will queue until rack01-11 is up).
 PFS="${SOFTMIG_PREFLIGHT_SECS:-120}"
 if [ "${PFS}" != "0" ]; then
     echo "Preflight: waiting up to ${PFS}s for softmig GPU (l40s.4)..."
@@ -31,7 +32,7 @@ if [ "${PFS}" != "0" ]; then
             --gres=gpu:l40s.4:1 --cpus-per-task=1 --mem=1G --time=00:02:00 \
             bash -lc 'hostname' >/dev/null 2>&1; then
         echo "ERROR: no GPU step started within ${PFS}s."
-        echo "  rack01-12 may be down/drained (check: sinfo -N -n rack01-12)."
+        echo "  rack01-11 may be down/drained (check: sinfo -N -n rack01-11)."
         echo "  Retry when healthy, or: SOFTMIG_PREFLIGHT_SECS=0 $0   # queue and wait on each srun"
         exit 1
     fi
@@ -48,7 +49,10 @@ printf 'cuda_ver\tslice\tsuite\tjobid\tstatus\tmetric\tdetail\n' > "$TSV"
 
 VERSIONS=(12.2 12.6 12.9 13.2)
 SLICES=(l40s.2 l40s.4)
-PER_VER_SUITES=(smoke direct sm oom crossjob)
+FULLGPU_SLICES=(l40s)
+PER_VER_SUITES=(smoke direct sm oom crossjob pool passive)
+# Suites that make sense without a config file (passive full-GPU jobs).
+FULLGPU_SUITES=(smoke direct pool passive)
 
 echo "Matrix root: $ROOT"
 echo "Versions   : ${VERSIONS[*]}"
@@ -82,6 +86,15 @@ for CUDA_VER in "${VERSIONS[@]}"; do
             run_suite "test/suite_${s}.sh" "$ROOT/${CUDA_VER}/${SLICE}/${s}"
         done
     done
+    # Full-GPU (passive) slice: only suites that do not need a limit.
+    for SLICE in "${FULLGPU_SLICES[@]}"; do
+        echo "=== cuda/${CUDA_VER} on ${SLICE} (passive) ==="
+        export CUDA_VER SLICE
+        for s in "${FULLGPU_SUITES[@]}"; do
+            echo "  [${s}]"
+            run_suite "test/suite_${s}.sh" "$ROOT/${CUDA_VER}/${SLICE}/${s}"
+        done
+    done
 done
 
 # --- one-offs ---
@@ -100,6 +113,25 @@ CUDA_VER=12.2 SLICE=l40s.4 \
 echo "  [nvsmi filter on l40s.4 cuda/12.2]"
 CUDA_VER=12.2 SLICE=l40s.4 \
   run_suite "test/suite_nvsmi.sh" "$ROOT/oneoff/nvsmi"
+
+# 2.06 one-offs (CUDA 12.6): concurrency, faults, frameworks, process models,
+# multi-GPU, arrays, config tampering, containers, overhead.
+for s in stress fault frameworks fork multigpu array security container overhead; do
+    sl=l40s.4
+    [ "$s" = stress ] && sl=l40s.2
+    echo "  [${s} on ${sl} cuda/12.6]"
+    CUDA_VER=12.6 SLICE=$sl run_suite "test/suite_${s}.sh" "$ROOT/oneoff/${s}"
+done
+
+# 2.06 pressure/share one-offs (node-side sampler, multi-job): one scenario
+# each here; the full set is test/run_sets.sh.
+echo "  [share S1 / passthrough P1 / mixed M1 / gpuburn B1 / bypass on cuda/12.6]"
+CUDA_VER=12.6 SLICE=mixed  SCENARIO=S1 SHARE_ROTATE=1 run_suite "test/suite_share.sh"        "$ROOT/oneoff/share_S1"
+CUDA_VER=12.6 SLICE=mixed  SCENARIO=P1 run_suite "test/suite_passthrough.sh"  "$ROOT/oneoff/passthrough_P1"
+CUDA_VER=12.6 SLICE=mixed  SCENARIO=M1 run_suite "test/suite_mixed_pieces.sh" "$ROOT/oneoff/mixed_pieces_M1"
+CUDA_VER=12.6 SLICE=mixed  SCENARIO=B1 run_suite "test/suite_gpuburn.sh"      "$ROOT/oneoff/gpuburn_B1"
+CUDA_VER=12.6 SLICE=l40s.4 run_suite "test/suite_bypass.sh"    "$ROOT/oneoff/bypass_q"
+CUDA_VER=12.6 SLICE=l40s.4 SOFTMIG_TEST_SUDO=1 run_suite "test/suite_isolation.sh" "$ROOT/oneoff/isolation"
 
 echo
 echo "End: $(date)"

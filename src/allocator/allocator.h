@@ -105,6 +105,12 @@ extern pthread_mutex_t mutex;
  */
 int oom_check(const int dev,size_t addon);
 
+/** Admit size bytes on CUDA device dev against the limit and hold them as
+ *  pending until committed (add_chunk_only / add_chunk_async_only) or
+ *  released (softmig_unreserve). Returns 0 if admitted, 1 if over the limit. */
+int softmig_reserve(int dev, size_t size);
+void softmig_unreserve(int dev, size_t size);
+
 /** Allocate GPU memory with OOM check; thread-safe. Returns CUDA error code. */
 int allocate_raw(CUdeviceptr *dptr, size_t size);
 
@@ -113,6 +119,10 @@ int free_raw(CUdeviceptr dptr);
 
 /** Track an externally-allocated chunk (e.g., cuMemAllocManaged) with OOM check. */
 int add_chunk_only(CUdeviceptr address,size_t size);
+
+/** Track an externally-allocated async chunk (e.g., cuMemAllocFromPoolAsync).
+ *  Caller has already run the OOM check and the real allocation. */
+int add_chunk_async_only(CUdeviceptr address,size_t size);
 
 /** Remove tracking for an externally-freed chunk. */
 int remove_chunk_only(CUdeviceptr address);

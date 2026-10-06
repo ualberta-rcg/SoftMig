@@ -14,6 +14,7 @@
 #include <pthread.h>
 
 #include "static_config.h"
+#include "include/softmig_mode.h"
 
 
 #define CUDA_DEVICE_MEMORY_LIMIT "CUDA_DEVICE_MEMORY_LIMIT"
@@ -26,9 +27,10 @@
 extern int wait_status_self(int status);
 
 #define ENSURE_RUNNING() {                                \
-   /* LOG_DEBUG("Memory op at %d",__LINE__); */              \
-    ensure_initialized();                                 \
-    while(!wait_status_self(1)) { LOG_DEBUG("E1"); sleep(1); }             \
+    if (!softmig_is_passive()) {                          \
+        ensure_initialized();                             \
+        while(!wait_status_self(1)) { LOG_DEBUG("E1"); sleep(1); } \
+    }                                                     \
 }                                                         \
 
 #include "multiprocess/multiprocess_memory_limit.h"

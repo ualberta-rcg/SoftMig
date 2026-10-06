@@ -1,113 +1,48 @@
 #!/bin/bash
-# Overnight SoftMig reliability runbook.
-# Does NOT reserve an allocation itself; it launches suites that call srun.
+# Overnight SoftMig reliability run (launcher).
 #
-# Usage:
-#   HOURS=10 bash test/run_overnight.sh
+#   HOURS=8 bash test/run_overnight.sh
 #
-# Artifacts:
-#   test_results/overnight_<timestamp>/
-
+# The login side only (1) starts the root node sampler over sudo ssh (sudo is
+# not available inside jobs), (2) submits test/overnight_driver.sh as a
+# CPU-only job on the reservation node, which runs the cycles and launches
+# every GPU test as its own job, and (3) when the driver ends, stops the
+# sampler and writes SUMMARY.md.
+#
+# Artifacts: test_results/overnight_<ts>/ {results.tsv, cycle_N/..., sampler/,
+# driver.out, SUMMARY.md}. Morning check: cat $(cat test_results/overnight_latest.txt)/SUMMARY.md
 set -u
-SOFTMIG_ROOT=/scratch/rahimk/SoftMig
+SOFTMIG_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$SOFTMIG_ROOT" || exit 1
+umask 002
 
-HOURS="${HOURS:-10}"
-if ! [[ "$HOURS" =~ ^[0-9]+$ ]] || [ "$HOURS" -le 0 ]; then
-  echo "HOURS must be a positive integer"
-  exit 1
-fi
+HOURS="${HOURS:-8}"
+[[ "$HOURS" =~ ^[0-9]+$ ]] && [ "$HOURS" -gt 0 ] || { echo "HOURS must be a positive integer"; exit 1; }
+NODE="${SOFTMIG_NODE:-rack01-11}"
 
 TS=$(date +%Y%m%d_%H%M%S)
 ROOT="$SOFTMIG_ROOT/test_results/overnight_${TS}"
-mkdir -p "$ROOT"
+mkdir -p "$ROOT/sampler"
 echo "$ROOT" > "$SOFTMIG_ROOT/test_results/overnight_latest.txt"
+echo "root: $ROOT"
+echo "lib on node: $(sudo -n ssh -o BatchMode=yes "$NODE" 'sha256sum /usr/local/lib/libsoftmig.so' 2>/dev/null | cut -c1-16)" | tee "$ROOT/lib.txt"
 
-RESULTS="$ROOT/results.tsv"
-printf 'cycle\tcuda_ver\tslice\tsuite\tjobid\tstatus\tmetric\tdetail\n' > "$RESULTS"
+bash test/node_sampler.sh start "$ROOT/sampler" "$NODE" || { echo "sampler did not start"; exit 1; }
 
-END_EPOCH=$(( $(date +%s) + HOURS * 3600 ))
-CYCLE=0
+# the driver gets HOURS plus margin for the running cycle to finish
+DRV_TIME=$(( HOURS + 2 ))
+jid=$(sbatch --parsable --reservation=softmig ${SRUN_EXTRA:-} --job-name=softmig-overnight \
+      --cpus-per-task=2 --mem=4G --time="${DRV_TIME}:00:00" --output="$ROOT/driver.out" \
+      --export=ALL,ROOT="$ROOT",HOURS="$HOURS",SAMPLER_SHARED="$ROOT/sampler",SOFTMIG_ROOT="$SOFTMIG_ROOT",SHARE_SECS="${SHARE_SECS:-60}" \
+      test/overnight_driver.sh)
+jid="${jid%%;*}"
+echo "$jid" > "$ROOT/driver.jid"
+echo "driver job: $jid (time limit ${DRV_TIME}h)"
 
-run_suite() {
-  local cycle="$1" ver="$2" slice="$3" suite="$4" outdir="$5"
-  mkdir -p "$outdir"
-  local line
-  line=$(OUT="$outdir" CUDA_VER="$ver" SLICE="$slice" bash "test/suite_${suite}.sh" 2>/dev/null | tail -1)
-  if [ -n "$line" ]; then
-    printf '%s\t%s\n' "$cycle" "$line" >> "$RESULTS"
-  else
-    printf '%s\t%s\t%s\t%s\tNA\tFAIL\t0\tno output from suite\n' "$cycle" "$ver" "$slice" "$suite" >> "$RESULTS"
-  fi
-}
-
-while [ "$(date +%s)" -lt "$END_EPOCH" ]; do
-  CYCLE=$((CYCLE + 1))
-  CROOT="$ROOT/cycle_${CYCLE}"
-  mkdir -p "$CROOT"
-  echo "=== cycle $CYCLE start $(date) ===" | tee -a "$ROOT/phase.log"
-
-  # Control checks: correctness and compatibility in relatively isolated runs.
-  for ver in 12.2 12.6 12.9 13.2; do
-    run_suite "$CYCLE" "$ver" "l40s.4" "direct" "$CROOT/direct_${ver}_4"
-    run_suite "$CYCLE" "$ver" "l40s.4" "nvsmi" "$CROOT/nvsmi_${ver}_4"
-    run_suite "$CYCLE" "$ver" "l40s.2" "oom" "$CROOT/oom_${ver}_2"
-    run_suite "$CYCLE" "$ver" "l40s.2" "sm" "$CROOT/sm_${ver}_2"
-  done
-
-  # Soak check (script now fixed and should emit a verdict)
-  run_suite "$CYCLE" "12.2" "l40s.4" "soak" "$CROOT/soak_12.2_4"
-
-  # Parallel leak stress: many nvsmi checks + background burn pressure.
-  SROOT="$CROOT/stress_nvsmi"
-  mkdir -p "$SROOT"
-  printf 'cycle\tcuda_ver\tslice\tsuite\tjobid\tstatus\tmetric\tdetail\n' > "$SROOT/results.tsv"
-
-  for i in $(seq 1 8); do
-    case $(( (i - 1) % 4 )) in
-      0) ver=12.2 ;;
-      1) ver=12.6 ;;
-      2) ver=12.9 ;;
-      3) ver=13.2 ;;
-    esac
-    (
-      line=$(OUT="$SROOT/nvsmi_$i" CUDA_VER="$ver" SLICE="l40s.4" bash test/suite_nvsmi.sh 2>/dev/null | tail -1)
-      if [ -n "$line" ]; then
-        printf '%s\t%s\n' "$CYCLE" "$line" >> "$SROOT/results.tsv"
-      else
-        printf '%s\t%s\t%s\tnvsmi\tNA\tFAIL\t0\tno output from suite\n' "$CYCLE" "$ver" "l40s.4" >> "$SROOT/results.tsv"
-      fi
-    ) &
-  done
-
-  for j in $(seq 1 4); do
-    case $(( (j - 1) % 4 )) in
-      0) ver=12.2 ;;
-      1) ver=12.6 ;;
-      2) ver=12.9 ;;
-      3) ver=13.2 ;;
-    esac
-    (
-      srun --reservation=softmig --gres=gpu:l40s.4:1 --cpus-per-task=8 --mem=10G --time=00:08:00 \
-        bash -lc "module load cuda/${ver}; cd ${SOFTMIG_ROOT}; export SOFTMIG_LOG_LEVEL=4; N=4 MB=4096 DUR=30 OUT='${SROOT}/burn_${j}' test/run_burn.sh >/dev/null 2>&1" \
-        >> "$SROOT/burn.log" 2>&1
-    ) &
-  done
-  wait
-
-  # Append stress nvsmi lines to main results.
-  if [ -s "$SROOT/results.tsv" ]; then
-    awk 'NR>1 {print}' "$SROOT/results.tsv" >> "$RESULTS"
-  fi
-
-  # Per-cycle quick summary.
-  {
-    echo "cycle=$CYCLE"
-    awk -F'\t' -v c="$CYCLE" 'NR>1 && $1==c {cnt[$6]++} END{for (k in cnt) print k "=" cnt[k]} ' "$RESULTS" | sort
-    echo
-  } >> "$ROOT/cycle_summary.txt"
-
-  echo "=== cycle $CYCLE end $(date) ===" | tee -a "$ROOT/phase.log"
-done
-
+# wait for the driver, then stop the sampler
+while [ -n "$(squeue -h -j "$jid" 2>/dev/null)" ]; do sleep 60; done
+bash test/node_sampler.sh stop "$ROOT/sampler" "$NODE" > "$ROOT/sampler/stop.txt" 2>&1
+python3 test/sets_summary.py "$ROOT" > "$ROOT/SUMMARY.md" 2>/dev/null
 echo "Overnight run complete: $ROOT"
+tail -3 "$ROOT/driver.out" 2>/dev/null
+head -5 "$ROOT/SUMMARY.md"

@@ -22,7 +22,7 @@ summarize() {
         cp "$f" "${OUT}/${tag}_softmig.log" 2>/dev/null || true
         local n err
         n=$(wc -l < "$f")
-        err=$(grep -c 'softmig ERROR' "$f" 2>/dev/null || echo 0)
+        err=$(grep -c 'softmig ERROR' "$f" 2>/dev/null); err=${err:-0}
         echo "[$tag] softmig log lines: $n errors: $err"
     else
         echo "[$tag] no softmig log at $f"

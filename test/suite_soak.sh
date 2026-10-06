@@ -34,7 +34,7 @@ SAMPLE_FILE='${OUT}/samples.tsv'
 echo -e 't\tshrreg_bytes\tfd_p1\tfd_p2\tfd_p3\tfd_p4\tnvsmi_util%\tnvsmi_mem_MB' > \"\$SAMPLE_FILE\"
 for t in 30 60 90 120 150 180 210 240 270 300; do
   sleep 30
-  SZ=\$(stat -c %s /dev/shm/libsoftmig* 2>/dev/null | awk 'BEGIN{m=0} {if ($1+0>m) m=$1+0} END{print m+0}')
+  SZ=\$(stat -c %s /dev/shm/libsoftmig* 2>/dev/null | awk 'BEGIN{m=0} {if (\$1+0>m) m=\$1+0} END{print m+0}')
   [ -z \"\$SZ\" ] && SZ=0
   fd_count() {
     local p=\"\$1\"

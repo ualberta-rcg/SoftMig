@@ -20,12 +20,24 @@ set(LIBSOFTMIG softmig)
 # catch apps that link -lcuda / -lnvidia-ml directly (gpu-burn, cuda-samples,
 # etc.) instead of going through cudart's dlsym() path.
 set(SOFTMIG_VERSION_SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/softmig.ver)
+file(GLOB SOFTMIG_WRAPPER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/cuda/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/nvml/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/multiprocess/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/libsoftmig.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/utils.c)
+# The version script is followed by check_passive_guards.sh: the build fails if
+# an exported wrapper touches SoftMig state without a passive-mode forward.
 add_custom_command(
     OUTPUT ${SOFTMIG_VERSION_SCRIPT}
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/gen_version_script.sh
             ${CMAKE_CURRENT_SOURCE_DIR} ${SOFTMIG_VERSION_SCRIPT}
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/check_passive_guards.sh
+            ${CMAKE_CURRENT_SOURCE_DIR} ${SOFTMIG_VERSION_SCRIPT}
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_version_script.sh
-    COMMENT "Generating SoftMig linker version script"
+            ${CMAKE_CURRENT_SOURCE_DIR}/check_passive_guards.sh
+            ${SOFTMIG_WRAPPER_SOURCES}
+    COMMENT "Generating SoftMig linker version script and checking passive guards"
     VERBATIM
 )
 add_custom_target(softmig_version_script DEPENDS ${SOFTMIG_VERSION_SCRIPT})

@@ -5,12 +5,17 @@
 
 # ===== softmig GPU SLICING CONFIGURATION =====
 # REQUIREMENT: Library must be added to /etc/ld.so.preload (one-time setup, requires root)
-#   echo "/var/lib/shared/libsoftmig.so" | sudo tee -a /etc/ld.so.preload
+#   echo "/usr/local/lib/libsoftmig.so" | sudo tee -a /etc/ld.so.preload
 #
 # HOW IT WORKS:
 # - Library is loaded system-wide via /etc/ld.so.preload (users cannot disable it)
-# - Library is passive (does nothing) until a config file is created
+# - Library is passive (pure pass-through to the driver) unless this job has a
+#   root-owned /var/run/softmig/<jobid>[_<arrayid>].conf
 # - This prolog creates the config file, which activates the library for this job
+#
+# Do not copy the config elsewhere (e.g. /dev/shm): the library only reads
+# /var/run/softmig, and with job_container/tmpfs /dev/shm is per-job anyway.
+# Do not dump `env` to a world-readable log here.
 
 set -euo pipefail
 
@@ -30,11 +35,13 @@ if [[ "${REQ_TRES:-}" == *"gres/shard"* ]]; then
     # Build config file path (include array task ID if this is an array job).
     # SLURM_ARRAY_TASK_ID is not always set in the prolog environment,
     # so extract it from the scontrol --json we already fetched.
+    # array_task_id.number is 0 (with set=false) for non-array jobs, so check set.
+    ARRAY_SET=$(echo "$JOB_JSON" | jq -r '.jobs[0].array_task_id.set // "false"' 2>/dev/null || echo "false")
     ARRAY_TASK_ID=$(echo "$JOB_JSON" | jq -r '.jobs[0].array_task_id.number // empty' 2>/dev/null || echo "")
     CONFIG_FILE="/var/run/softmig/${SLURM_JOB_ID}"
     if [[ -n "${SLURM_ARRAY_TASK_ID:-}" ]]; then
         CONFIG_FILE="${CONFIG_FILE}_${SLURM_ARRAY_TASK_ID}"
-    elif [[ -n "${ARRAY_TASK_ID:-}" ]] && [[ "$ARRAY_TASK_ID" != "null" ]]; then
+    elif [[ "$ARRAY_SET" == "true" ]] && [[ -n "${ARRAY_TASK_ID:-}" ]] && [[ "$ARRAY_TASK_ID" != "null" ]]; then
         CONFIG_FILE="${CONFIG_FILE}_${ARRAY_TASK_ID}"
     fi
     CONFIG_FILE="${CONFIG_FILE}.conf"
@@ -42,8 +49,8 @@ if [[ "${REQ_TRES:-}" == *"gres/shard"* ]]; then
     # Get total GPU memory from first GPU using nvidia-smi (in MB, convert to GB)
     TOTAL_GPU_MEMORY_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i 0 2>/dev/null | head -n1 || echo "")
     if [[ -z "$TOTAL_GPU_MEMORY_MB" ]] || ! [[ "$TOTAL_GPU_MEMORY_MB" =~ ^[0-9]+$ ]]; then
-        # Fallback to default if nvidia-smi fails or returns invalid value
-        TOTAL_GPU_MEMORY_MB=46068 # Replace with default value
+        TOTAL_GPU_MEMORY_MB=46068 # Replace with your GPU's memory.total in MiB
+        logger -t slurm_prolog "Warning: nvidia-smi memory query failed, using default ${TOTAL_GPU_MEMORY_MB} MiB"
     fi
     
     # Remove JSON quotes if present and extract shard count from REQ_TRES
@@ -58,8 +65,12 @@ if [[ "${REQ_TRES:-}" == *"gres/shard"* ]]; then
         if [[ "$shard_spec" =~ gres/shard=([0-9]+) ]]; then
             count="${BASH_REMATCH[1]}"
             SHARD_COUNT=$((SHARD_COUNT + count))
+        # Match gres/shard:count or gres/shard:gpu_name:count (colon format)
+        elif [[ "$shard_spec" =~ gres/shard(:[^:=]+)?:([0-9]+) ]]; then
+            count="${BASH_REMATCH[2]}"
+            SHARD_COUNT=$((SHARD_COUNT + count))
         fi
-    done < <(echo "$REQ_TRES_CLEAN" | grep -oE 'gres/shard=[0-9]+' || true)
+    done < <(echo "$REQ_TRES_CLEAN" | grep -oE 'gres/shard=[0-9]+|gres/shard(:[^,}":]+)?:[0-9]+' || true)
     
     # Default to 1 shard if parsing failed
     if [[ $SHARD_COUNT -eq 0 ]]; then

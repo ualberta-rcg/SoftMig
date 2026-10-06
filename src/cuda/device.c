@@ -77,22 +77,22 @@ CUresult cuDeviceGetLuid(char *luid, unsigned int *deviceNodeMask,
 }
 
 CUresult cuDeviceTotalMem_v2 ( size_t* bytes, CUdevice dev ) {
+    SOFTMIG_PASSIVE_FORWARD(cuDeviceTotalMem_v2, bytes, dev);
     LOG_DEBUG("into cuDeviceTotalMem");
     ENSURE_INITIALIZED();
+    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry, cuDeviceTotalMem_v2, bytes, dev);
+    if (res != CUDA_SUCCESS) {
+        return res;
+    }
     size_t limit = get_current_device_memory_limit(dev);
-    *bytes = limit;
+    if (limit != 0 && limit < *bytes) {
+        *bytes = limit;
+    }
     return CUDA_SUCCESS;
 }
 
 CUresult cuDriverGetVersion(int *driverVersion) {
-    //stub dlsym to prelaod cuda functions
-    dlsym(RTLD_DEFAULT,"cuDriverGetVersion");
-
-    CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuDriverGetVersion,driverVersion);
-    //*driverVersion=11030;
-    if ((res==CUDA_SUCCESS) && (driverVersion!=NULL)) {
-    }
-    return res;
+    return CUDA_OVERRIDE_CALL(cuda_library_entry,cuDriverGetVersion,driverVersion);
 }
 
 CUresult cuDeviceGetTexture1DLinearMaxWidth(size_t *maxWidthInElements, CUarray_format format, unsigned numChannels, CUdevice dev){

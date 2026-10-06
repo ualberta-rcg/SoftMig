@@ -21,13 +21,13 @@
 #include "include/dlsym_resolve.h"
 #include "allocator/allocator.h"
 #include "multiprocess/multiprocess_memory_limit.h"
+#include "include/softmig_mode.h"
 
 extern void init_utilization_watcher(void);
 extern void utilization_watcher(void);
 extern int set_host_pid(int hostpid);
 extern void allocator_init(void);
 void preInit();
-void *vgpulib;
 
 pthread_once_t pre_cuinit_flag = PTHREAD_ONCE_INIT;
 pthread_once_t post_cuinit_flag = PTHREAD_ONCE_INIT;
@@ -104,13 +104,6 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
             }
             // Fall through to try to use system dlsym directly (won't work but won't crash)
         }
-        
-        char *path_search=getenv("CUDA_REDIRECT");
-        if ((path_search!=NULL) && (strlen(path_search)>0)){
-            vgpulib = dlopen(path_search,RTLD_LAZY);
-        }else{
-            vgpulib = dlopen("/usr/local/softmig/libsoftmig.so",RTLD_LAZY);
-        }
     }
     // If we don't have real_dlsym, we can't hook properly - just fail gracefully
     if (real_dlsym == NULL) {
@@ -139,26 +132,29 @@ FUNC_ATTR_VISIBLE void* dlsym(void* handle, const char* symbol) {
         return h;
     }
     if (symbol[0] == 'c' && symbol[1] == 'u') {
+        if (softmig_is_passive()) {
+            return real_dlsym(handle, symbol);
+        }
         //Compatible with cuda 12.8+ fix
         if (strcmp(symbol,"cuGetExportTable")!=0)
             pthread_once(&pre_cuinit_flag,(void(*)(void))preInit);
-        // Try to get our hooked version first
         void* f = __dlsym_hook_section(handle, symbol);
         if (f != NULL) {
             return f;
         }
-        // Fallback to real library if hook not found
-        void *f2 = real_dlsym(vgpulib,symbol);
-        if (f2!=NULL)
-            return f2;
+        softmig_note_unhooked(symbol, "dlsym");
     }
     #ifdef HOOK_NVML_ENABLE
     if (symbol[0] == 'n' && symbol[1] == 'v' &&
           symbol[2] == 'm' && symbol[3] == 'l' ) {
+        if (softmig_is_passive()) {
+            return real_dlsym(handle, symbol);
+        }
         void* f = __dlsym_hook_section_nvml(handle, symbol);
         if (f != NULL) {
             return f;
         }
+        softmig_note_unhooked(symbol, "dlsym");
     }
 #endif
     return real_dlsym(handle, symbol);
@@ -251,6 +247,10 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuFuncSetAttribute);
     DLSYM_HOOK_FUNC(cuLaunchKernel);
     DLSYM_HOOK_FUNC(cuLaunchCooperativeKernel);
+    DLSYM_HOOK_FUNC(cuLaunchKernelEx);
+    DLSYM_HOOK_FUNC(cuLaunchKernel_ptsz);
+    DLSYM_HOOK_FUNC(cuLaunchKernelEx_ptsz);
+    DLSYM_HOOK_FUNC(cuLaunchCooperativeKernel_ptsz);
     DLSYM_HOOK_FUNC(cuIpcOpenMemHandle_v2);
     DLSYM_HOOK_FUNC(cuIpcGetMemHandle);
     DLSYM_HOOK_FUNC(cuIpcCloseMemHandle);
@@ -304,6 +304,10 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(cuMemMap);
     DLSYM_HOOK_FUNC(cuMemImportFromShareableHandle);
     DLSYM_HOOK_FUNC(cuMemAllocAsync);
+    DLSYM_HOOK_FUNC(cuMemFreeAsync);
+    DLSYM_HOOK_FUNC(cuMemAllocAsync_ptsz);
+    DLSYM_HOOK_FUNC(cuMemFreeAsync_ptsz);
+    DLSYM_HOOK_FUNC(cuMemAllocFromPoolAsync_ptsz);
     // cuda 11.7 new memory ops
     DLSYM_HOOK_FUNC(cuMemHostGetDevicePointer_v2);
     DLSYM_HOOK_FUNC(cuMemHostGetFlags);
@@ -341,12 +345,20 @@ void* __dlsym_hook_section(void* handle, const char* symbol) {
     // are pass-throughs with CUDA 13 signature changes; we let dlsym
     // resolve them directly from libcuda.
     DLSYM_HOOK_FUNC(cuGraphLaunch);
+    DLSYM_HOOK_FUNC(cuGraphLaunch_ptsz);
+    DLSYM_HOOK_FUNC(cuGraphAddMemAllocNode);
+    DLSYM_HOOK_FUNC(cuGraphAddMemFreeNode);
 #ifdef HOOK_MEMINFO_ENABLE
     DLSYM_HOOK_FUNC(cuMemGetInfo);
     DLSYM_HOOK_FUNC(cuMemGetInfo_v2);
 #endif
     return NULL;
 }
+
+/* Declared under asm names: CUDA <= 12.2 nvml.h lacks these, newer ones
+ * declare them with struct types this file cannot rely on. */
+extern char softmig_hook_nvmlDeviceGetRunningProcessDetailList[] __asm__("nvmlDeviceGetRunningProcessDetailList");
+extern char softmig_hook_nvmlDeviceGetProcessesUtilizationInfo[] __asm__("nvmlDeviceGetProcessesUtilizationInfo");
 
 void* __dlsym_hook_section_nvml(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(nvmlInit);
@@ -828,6 +840,18 @@ void* __dlsym_hook_section_nvml(void* handle, const char* symbol) {
     DLSYM_HOOK_FUNC(nvmlDeviceGetComputeRunningProcesses_v2);
     /** nvmlDeviceGetGraphicsRunningProcesses_v2 */
     DLSYM_HOOK_FUNC(nvmlDeviceGetGraphicsRunningProcesses_v2);
+    /** nvmlDeviceGetComputeRunningProcesses_v3 */
+    DLSYM_HOOK_FUNC(nvmlDeviceGetComputeRunningProcesses_v3);
+    /** nvmlDeviceGetGraphicsRunningProcesses_v3 */
+    DLSYM_HOOK_FUNC(nvmlDeviceGetGraphicsRunningProcesses_v3);
+    DLSYM_HOOK_FUNC(nvmlDeviceGetMPSComputeRunningProcesses_v2);
+    DLSYM_HOOK_FUNC(nvmlDeviceGetMPSComputeRunningProcesses_v3);
+    if (0 == strcmp(symbol, "nvmlDeviceGetRunningProcessDetailList")) {
+        return (void*) softmig_hook_nvmlDeviceGetRunningProcessDetailList;
+    }
+    if (0 == strcmp(symbol, "nvmlDeviceGetProcessesUtilizationInfo")) {
+        return (void*) softmig_hook_nvmlDeviceGetProcessesUtilizationInfo;
+    }
     /** nvmlDeviceSetTemperatureThreshold */
     DLSYM_HOOK_FUNC(nvmlDeviceSetTemperatureThreshold);
     /** nvmlVgpuInstanceGetGpuInstanceId */
@@ -843,7 +867,7 @@ void preInit(){
     if (real_dlsym == NULL) {
         real_dlsym = resolve_real_dlsym();
     }
-    load_cuda_libraries();
+    softmig_ensure_cuda_table();
     ENSURE_INITIALIZED();
 }
 
@@ -867,6 +891,7 @@ void postInit(){
 }
 
 CUresult cuInit(unsigned int Flags){
+    SOFTMIG_PASSIVE_FORWARD(cuInit, Flags);
     pthread_once(&pre_cuinit_flag,(void(*)(void))preInit);
     ENSURE_INITIALIZED();
     CUresult res = CUDA_OVERRIDE_CALL(cuda_library_entry,cuInit,Flags);

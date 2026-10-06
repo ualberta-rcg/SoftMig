@@ -13,7 +13,10 @@
 #include <unistd.h>
 #include <sys/stat.h>
 #include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
 #include "include/log_utils.h"
+#include "include/softmig_mode.h"
 
 static int is_numeric(const char *s) {
     if (s == NULL || *s == '\0') return 0;
@@ -73,25 +76,34 @@ static int read_config_value(const char* key, char* value, size_t value_size) {
         return 0;
     }
 
-    struct stat st;
-    if (lstat(config_path, &st) != 0) {
+    // Open first, then validate the opened file, so the checked file is the
+    // one we read (no lstat/fopen race).
+    int fd = open(config_path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == ELOOP) {
+            LOG_WARN("Config file is a symlink, refusing to read: %s", config_path);
+        }
         return 0;
     }
-    if (S_ISLNK(st.st_mode)) {
-        LOG_WARN("Config file is a symlink, refusing to read: %s", config_path);
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        close(fd);
         return 0;
     }
     if (!S_ISREG(st.st_mode)) {
         LOG_WARN("Config file is not a regular file: %s", config_path);
+        close(fd);
         return 0;
     }
     if (st.st_uid != 0) {
         LOG_WARN("Config file not owned by root (uid=%u): %s", st.st_uid, config_path);
+        close(fd);
         return 0;
     }
-    
-    FILE* f = fopen(config_path, "r");
+
+    FILE* f = fdopen(fd, "r");
     if (f == NULL) {
+        close(fd);
         return 0;
     }
     
@@ -309,5 +321,23 @@ int is_softmig_configured(void) {
     
     // Neither is set - softmig should be passive
     return 0;
+}
+
+volatile int softmig_mode_cached = -1;
+static pthread_once_t softmig_mode_once = PTHREAD_ONCE_INIT;
+
+static void softmig_mode_decide(void) {
+    int passive = !is_softmig_configured();
+    if (passive) {
+        LOG_DEBUG("softmig: CUDA_DEVICE_MEMORY_LIMIT and CUDA_DEVICE_SM_LIMIT not set - softmig disabled (passive mode)");
+    }
+    __sync_synchronize();
+    softmig_mode_cached = passive;
+}
+
+/** Decide passive vs enabled once per process; returns 1 for passive. */
+int softmig_mode_init(void) {
+    pthread_once(&softmig_mode_once, softmig_mode_decide);
+    return softmig_mode_cached;
 }
 

@@ -75,9 +75,9 @@ metric="ok=${success} oom=${oom} signaled=${signaled}"
 
 if [ -n "$LEGACY_KILLER" ]; then
     # Legacy path: expect killer firing + at least one SIGKILL exit
-    oom_detect=$(grep -c "Device 0 OOM " "$slog" 2>/dev/null || echo 0)
-    killer_fired=$(grep -c "ACTIVE_OOM_KILLER" "$slog" 2>/dev/null || echo 0)
-    kills=$(grep -c "KILLED PID [0-9]\+ successfully" "$slog" 2>/dev/null || echo 0)
+    oom_detect=$(_grepc "Device 0 OOM " "$slog")
+    killer_fired=$(_grepc "ACTIVE_OOM_KILLER" "$slog")
+    kills=$(_grepc "KILLED PID [0-9]\+ successfully" "$slog")
     metric="$metric oom_evt=${oom_detect} killer=${killer_fired} kills=${kills}"
     if [ "$signaled" -ge 1 ] && [ "$kills" -ge 1 ]; then
         _emit "$jid" PASS "$signaled" "$metric (legacy killer mode)"

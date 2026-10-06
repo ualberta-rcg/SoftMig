@@ -23,7 +23,7 @@ Example scripts are provided in `docs/examples/`:
 | `/etc/ld.so.preload` | system-wide load of `libsoftmig.so` |
 | `/var/run/softmig/{jobid}.conf` | per-job limit config (root-owned) |
 | `/var/run/softmig/{jobid}_{arrayid}.conf` | per-array-task config (root-owned) |
-| `$SLURM_TMPDIR/cudevshr.cache.{jobid}[.{arrayid}]` | per-job shared memory region for memory tracking |
+| `$SLURM_TMPDIR/cudevshr.cache.v{layout}.{jobid}[.{arrayid}]` | per-job shared memory region for memory tracking (layout version in the name) |
 | `$SLURM_TMPDIR/vgpulock/lock.{jobid}` | per-job serialization lock file |
 | `/var/log/softmig/{jobid}.log` or `{jobid}_{arrayid}.log` | per-job logs (admin-visible) |
 
@@ -80,13 +80,21 @@ The prolog translates the SLURM shard request into the SoftMig runtime limits fo
 - write config file(s) as root (must be owned by uid 0; SoftMig rejects symlinks and non-root-owned files):
   - `/var/run/softmig/${SLURM_JOB_ID}.conf`
   - and/or `/var/run/softmig/${SLURM_JOB_ID}_${SLURM_ARRAY_TASK_ID}.conf` for array jobs
+- accept every shard spelling Slurm puts in `tres_req_str`: `gres/shard=N`, `gres/shard:N` and `gres/shard:<type>:N`
+
+The config file is the only switch. In a Slurm job without it, the preloaded library is a pure pass-through (no shared region, no watcher thread, no hooked symbols handed out); environment variables cannot turn it on. Do not copy the config anywhere else (for example `/dev/shm`): the library only reads `/var/run/softmig`.
+
 See: `docs/examples/prolog_softmig.sh`.
 
 ## Epilog responsibilities
 
-The epilog should remove config files and other per-job state created by the prolog, including array-job variants.
+The epilog should remove config files and other per-job state created by the prolog, including array-job variants (`${SLURM_JOB_ID}_*.conf`). An epilog that only removes `${SLURM_JOB_ID}.conf` leaves stale array configs in `/var/run/softmig`.
 
 See: `docs/examples/epilog_softmig.sh`.
+
+## job_container/tmpfs
+
+With `JobContainerType=job_container/tmpfs` (and `PrologFlags=Contain`) each job gets a private `/tmp` and `/dev/shm`. SoftMig's shared region (`/tmp/cudevshr.cache.v2.<jobid>`) is then per job by construction, so jobs sharing a GPU never see each other's region, and nothing needs to remove it in the prolog or epilog. Without job_container, keep the `cudevshr.cache` cleanup and make sure `/tmp` is not shared across users' jobs.
 
 ## Optional: job_submit.lua
 

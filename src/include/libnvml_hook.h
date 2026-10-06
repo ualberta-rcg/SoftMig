@@ -528,6 +528,18 @@ typedef enum {
   NVML_OVERRIDE_ENUM(nvmlDeviceGetComputeRunningProcesses_v2),
   /** nvmlDeviceGetGraphicsRunningProcesses_v2 */
   NVML_OVERRIDE_ENUM(nvmlDeviceGetGraphicsRunningProcesses_v2),
+  /** nvmlDeviceGetComputeRunningProcesses_v3 */
+  NVML_OVERRIDE_ENUM(nvmlDeviceGetComputeRunningProcesses_v3),
+  /** nvmlDeviceGetGraphicsRunningProcesses_v3 */
+  NVML_OVERRIDE_ENUM(nvmlDeviceGetGraphicsRunningProcesses_v3),
+  /** nvmlDeviceGetMPSComputeRunningProcesses_v2 */
+  NVML_OVERRIDE_ENUM(nvmlDeviceGetMPSComputeRunningProcesses_v2),
+  /** nvmlDeviceGetMPSComputeRunningProcesses_v3 */
+  NVML_OVERRIDE_ENUM(nvmlDeviceGetMPSComputeRunningProcesses_v3),
+  /** nvmlDeviceGetRunningProcessDetailList */
+  NVML_OVERRIDE_ENUM(nvmlDeviceGetRunningProcessDetailList),
+  /** nvmlDeviceGetProcessesUtilizationInfo */
+  NVML_OVERRIDE_ENUM(nvmlDeviceGetProcessesUtilizationInfo),
   /** nvmlDeviceSetTemperatureThreshold */
   NVML_OVERRIDE_ENUM(nvmlDeviceSetTemperatureThreshold),
   /** nvmlRetry_NvRmControl */
@@ -538,5 +550,14 @@ typedef enum {
   NVML_OVERRIDE_ENUM(nvmlVgpuTypeGetGpuInstanceProfileId),
   NVML_ENTRY_END
 } NVML_OVERRIDE_ENUM_t;
+
+/* Newer NVML process queries (R550+). nvml-subset.h predates their structs,
+ * so the hooks take opaque pointers; layouts live in nvml_entry.c. */
+nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses_v2(nvmlDevice_t device, unsigned int *infoCount,
+                                                        nvmlProcessInfo_t *infos);
+nvmlReturn_t nvmlDeviceGetMPSComputeRunningProcesses_v3(nvmlDevice_t device, unsigned int *infoCount,
+                                                        nvmlProcessInfo_t *infos);
+nvmlReturn_t nvmlDeviceGetRunningProcessDetailList(nvmlDevice_t device, void *plist);
+nvmlReturn_t nvmlDeviceGetProcessesUtilizationInfo(nvmlDevice_t device, void *procesesUtilInfo);
 
 #endif

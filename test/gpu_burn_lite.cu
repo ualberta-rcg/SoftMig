@@ -6,7 +6,10 @@
 // cuGetProcAddress/dlsym (which SoftMig hooks).
 //
 // Build: nvcc -O2 -arch=sm_80 -o gpu_burn_lite gpu_burn_lite.cu
-// Run  : ./gpu_burn_lite <alloc_mb> <run_seconds>
+// Run  : ./gpu_burn_lite <alloc_mb> <run_seconds> [max_launches]
+//        max_launches > 0 turns it into a fixed-work run (stops at that many
+//        launches or run_seconds, whichever first) so throughput under
+//        neighbours can be compared against an isolated run.
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +40,7 @@ __global__ void burn_kernel(float *a, float *b, float *c, size_t n, int iters) {
 int main(int argc, char **argv) {
     size_t alloc_mb = (argc > 1) ? strtoull(argv[1], NULL, 10) : 1024;
     int run_s      = (argc > 2) ? atoi(argv[2]) : 30;
+    size_t max_launches = (argc > 3) ? strtoull(argv[3], NULL, 10) : 0;
 
     CK(cudaSetDevice(0));
 
@@ -63,6 +67,7 @@ int main(int argc, char **argv) {
         clock_gettime(CLOCK_MONOTONIC, &now);
         double dt = (now.tv_sec - t0.tv_sec) + (now.tv_nsec - t0.tv_nsec) / 1e9;
         if (dt >= run_s) break;
+        if (max_launches && launches >= max_launches) break;
         burn_kernel<<<grid, block>>>(a, b, c, n, 256);
         launches++;
         // Force a sync every 100 launches so we can actually observe utilization
